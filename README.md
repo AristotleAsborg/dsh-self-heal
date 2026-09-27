@@ -6,13 +6,28 @@ English | [中文](README.zh-CN.md)
 
 Startup gate, crash supervisor and a bounded repair ladder for a DeepSeek Harness installation. Windows, Node 20+.
 
+**It starts on its own — you do not invoke anything.** Once installed, the whole chain is wired into your
+existing launcher, and it runs whether or not anyone is watching:
+
+- **Before every launch**, the gate checks the composition and refuses to start on a *confirmed*
+  inconsistency.
+- **When the host exits non-zero, the supervisor starts by itself.** Every failure path routes through the
+  launcher's exit code, so a crash — a window that closes instantly, a bad upgrade, a plugin that will not
+  load — is enough to trigger it. No second launcher, no manual step, no console left open.
+- **The repair ladder then starts by itself** too (`DSH_SUPERVISOR_REPAIR_AGENT=1` is the installer's
+  default), hands the evidence to a bounded headless session, and does not touch the user's own launcher
+  while doing it.
+
+Everything below describes what those automatic steps do and how to read their output. The one deliberate
+exception is documented under "Safety properties": recovery is bounded, and it stops rather than looping.
+
 ## What it does
 
 | Stage | File | Behaviour |
 | --- | --- | --- |
 | L0-1 gate | `start-gate.mjs` | Composes the profile tree before launch and refuses to start on a **confirmed** inconsistency: a config key the installed module rejects, or an installed copy that has drifted from its source. Fails open — a missing gate file or an internal error only warns. Verdict appended to `$DSH_HOME\state\gate.log`, and to the host log when that file is writable. |
-| L0 supervisor | `host-supervisor.mjs` | On a non-zero host exit it writes an incident bundle (log tail, gate verdict, composed tree), classifies the failure against the **last** launch attempt, and performs the one allow-listed repair: re-sync the installed bundles (`pnpm install`), then re-check the gate. Never changes the launcher's exit code, never relaunches by default. A summary is written before any long-running step, so a killed run still leaves one. |
-| L1 / L1.5 repair | `incident-repair.mjs` | Hands the incident to a bounded headless session — first `--profile headless`, then the factory `rescue` profile — under `repair/repair-overlay.yml`. Each rung runs detached with its output in the incident directory, so closing the window neither stops nor erases it; the console tails that file for live progress. |
+| L0 supervisor | `host-supervisor.mjs` | **Runs automatically on a non-zero host exit.** Writes an incident bundle (log tail, gate verdict, composed tree), classifies the failure against the **last** launch attempt, and performs the one allow-listed repair: re-sync the installed bundles (`pnpm install`), then re-check the gate. Never changes the launcher's exit code, never relaunches by default. A summary is written before any long-running step, so a killed run still leaves one. |
+| L1 / L1.5 repair | `incident-repair.mjs` | **Starts automatically after the supervisor**, and hands the incident to a bounded headless session — first `--profile headless`, then the factory `rescue` profile — under `repair/repair-overlay.yml`. Each rung runs detached with its output in the incident directory, so closing the window neither stops nor erases it; the console tails that file for live progress. |
 | Verdict | `incident-repair.mjs` | A rung counts as repaired when a real **boot probe** of the composition survives (scratch port 3081, hard timeout). Exit codes are not evidence, and a missing agent report is a warning rather than a veto. |
 | Fallback | `write-host-down-readme.mjs` | When no rung repairs it, copies `repair/HOST-DOWN-README.md` to a fixed path next to the launcher and appends the incident facts. |
 
@@ -150,67 +165,24 @@ lands in `$DSH_HOME\repair-<incident>\` and the supervisor copies it back on a b
 ## Tests and CI
 
 `.github/workflows/ci.yml` runs on Windows (every script here depends on cmd.exe batch semantics,
-CRLF-only launcher files and a native pnpm.exe — a Linux runner would exercise a different program)
-and does four things:
+CRLF-only launcher files and a native pnpm.exe — a Linux runner would exercise a different program) and
+checks four things: that every shipped script parses, that the kit directory matches the installer's
+copy list, that the installer works end to end, and that no script carries a machine-specific path.
 
-1. **Parse every shipped script** — there is no build step, so nothing else would notice a syntax error.
-2. **Check the kit directory against the installer's copy list**, in both directions. The installer
-   ships an explicit list, so adding a file does not ship it; `repair\` was silently never copied
-   while the config pointed straight at files inside it.
-3. **Run `ci-test.mjs`** — 55 checks that drive the real installer end to end.
-4. **Reject a machine-specific path in code** (comments excluded; the documented, overridable
-   defaults are allow-listed by exact text).
-
-`ci-test.mjs` is deliberately not a unit test. Run against a scratch harness whose path **contains a
-space**, it installs, asserts every declared file landed byte-identical, wires a launcher, then runs
-the whole thing **again** to prove the second run is a no-op — and mangles the launcher on purpose to
-prove a repeat run collapses it back to one copy instead of growing it. The two failure modes that
-mattered most (a percent-encoded `%20` path killing the copy, and wiring that grew the launcher on
-every run) are both invisible in a single run on an ordinary checkout, which is why they survived
-until someone ran the installer somewhere else.
-
-Run it locally with no dsh CLI required:
+Run the end-to-end suite locally — it needs no dsh CLI:
 
 ```powershell
-node ci-test.mjs
+node ci-test.mjs        # drives the real installer against a scratch harness
+node diff-parse.mjs --self-test   # the dump reader vs the real yaml package
 ```
 
-Deliberately not covered by CI, because reaching it needs a real dsh installation: the gate's refusal
-of a composed row whose config the installed module rejects. That path is exercised on a real box —
-see the incident this kit exists for.
+Both are developed against a scratch harness whose path **contains a space**, and the installer checks
+are run **twice** (a repeat run must be a no-op). That is not decoration: the failure modes that mattered
+most were invisible in a single run on an ordinary path. Neither suite is a substitute for starting the
+host once — see "What normal looks like" below.
 
-### The dump reader, and why it is compared rather than sampled
-
-`gate-parse.mjs` reads the composed `--dump-config` output so the gate can hand each module the same
-config object the host would. It is hand-written (the gate must run with nothing but the CLI's own
-`node_modules` present), which makes it exactly the kind of code that looks right and is not.
-
-It was originally checked against a fixture of our own — and that fixture passed while the reader was
-wrong in four separate ways. Comparing it against the real `yaml` package over a real 657-line dump
-found all four within minutes:
-
-| Defect | What it did |
-| --- | --- |
-| `name:` kept its quotes | `row.name === depName` never matched, so the gate's per-row config validation was **silently skipped** — the very check that exists to catch config/code drift |
-| `!!js` tags kept as text | a JS-valued config compared unequal to itself |
-| block scalars (`>-`, `|`) unhandled | the value became the literal marker `">-"`, **silently replacing a long prompt with two characters** |
-| sequences of maps lost their keys | `models: [- id: x]` became the strings `"id: x"`; and a row-boundary detector that matched `- id:` inside a row's own nested list made one row swallow every row after it (83 of 172 rows vanished) |
-
-The middle two are why this is worth reading about: both produced a **quietly wrong string**, and a
-quietly wrong string is the worst possible outcome for a check whose whole job is to decide whether a
-config is acceptable. A loud crash would have been found immediately.
-
-```powershell
-# frozen fixtures, needs no dsh — this is what CI runs
-node diff-parse.mjs --self-test
-
-# the real thing: compare against a LIVE dump (run this after upgrading dsh)
-node diff-parse.mjs <dump.txt> --cli <dsh>/lib/bin.js
-```
-
-The live comparison needs a real dsh install, so CI runs the fixtures and the live form is documented
-here instead of being faked in the workflow. Both print `SKIP` — never a false pass — when `yaml`
-cannot be resolved, and say plainly that the run proves nothing.
+Why the kit is tested this way, and what each check has caught, is recorded in the handover document
+rather than here.
 
 ## What normal looks like
 
