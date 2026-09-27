@@ -120,7 +120,7 @@ writeFileSync(`${dir}\\gate.txt`, `${gate.out}\n(exit=${gate.ok ? 0 : gate.code}
 
 // DSH_HOME is passed explicitly: the launcher's environment does not carry it, and without it
 // the CLI silently composes ANOTHER installation's home (found by the 2026-09-27 live-fire test).
-const dump = run(NODE, [BIN, '--profile', 'web', '--patch', HOME_PATCH, '--dump-config'], { env: { ...process.env, DSH_HOME: HOME } })
+const dump = run(NODE, [BIN, '--profile', CFG.PROFILE, '--patch', HOME_PATCH, '--dump-config'], { env: { ...process.env, DSH_HOME: HOME } })
 writeFileSync(`${dir}\\dump-config.txt`, `${dump.out}\n(exit=${dump.ok ? 0 : dump.code})\n`, 'utf8')
 
 // ── 2. classification ─────────────────────────────────────────────────────

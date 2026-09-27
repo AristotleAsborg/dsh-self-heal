@@ -83,6 +83,12 @@ $env:DSH_NO_PAUSE=1; cmd /c "D:\dsh\start-dsh.cmd -GateOnly"
 
 # 手动把最新事故交给修复阶梯
 node <harness>\config\incident-repair.mjs --ladder
+
+# 只看阶梯"会做什么"，不启动任何东西（不花 token）
+node <harness>\config\incident-repair.mjs --dry-run
+
+# 只收证据就停，不尝试修复
+node <harness>\config\incident-repair.mjs --no-ladder
 ```
 
 | 开关 | 含义 |
@@ -92,6 +98,8 @@ node <harness>\config\incident-repair.mjs --ladder
 | `DSH_NO_REPAIR_AGENT=1` | 不自动启动修复阶梯 |
 | `DSH_SUPERVISOR_RELAUNCH=1` | 修复成功后允许重启一次 |
 | `-GateOnly` | 只跑闸门并以它的判定退出 |
+| `--dry-run`（阶梯） | 只做计划：**不**启动会话、**不**跑探针，因此不花 token |
+| `--no-ladder`（阶梯） | 只收集证据就停：一级都不跑 |
 
 ## 安全性质
 

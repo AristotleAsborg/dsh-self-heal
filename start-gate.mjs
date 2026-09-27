@@ -22,6 +22,7 @@
  * the tail of dsh-console.log. It never writes to the composition.
  */
 import * as CFG from './self-heal.config.mjs'
+import { indentOf, parseRows } from './gate-parse.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -52,40 +53,24 @@ const findings = []
 const fail = (msg, fix) => findings.push({ level: 'FAIL', msg, fix })
 const warn = (msg, fix) => findings.push({ level: 'WARN', msg, fix })
 const pass = (msg) => findings.push({ level: 'PASS', msg })
-const indentOf = (s) => ((/^(\s*)/u.exec(s) ?? ['', ''])[1]).length
-
-/** Parse the composed dump into effective rows: last occurrence of each row id. */
-function parseRows(dump) {
-  const rows = new Map()
-  let current = null
-  for (const line of dump.split('\n')) {
-    const idMatch = /^\s*-?\s*id:\s*(\S+)\s*$/u.exec(line)
-    if (idMatch !== null) {
-      current = { id: idMatch[1], name: undefined, config: {}, disabled: false }
-      rows.set(current.id, current) // last occurrence wins: that is the effective row
-      continue
-    }
-    if (current === null) continue
-    const nameMatch = /^\s*name:\s*(\S+)\s*$/u.exec(line)
-    if (nameMatch !== null && current.name === undefined) { current.name = nameMatch[1]; continue }
-    if (/^\s*disabled:\s*true\s*$/u.test(line)) current.disabled = true
-    // config keys: any key deeper than a preceding "config:" line
-    const cfgAt = /^\s*config:\s*$/u.exec(line)
-    if (cfgAt !== null) { current.configIndent = indentOf(line); continue }
-    if (current.configIndent === undefined) continue
-    if (line.trim() === '' || indentOf(line) <= current.configIndent) { current.configIndent = undefined; continue }
-    const kv = /^\s+([A-Za-z][A-Za-z0-9]*):\s*(.*)$/u.exec(line)
-    if (kv !== null) current.config[kv[1]] = kv[2].trim()
-  }
-  return [...rows.values()]
-}
 
 // ── 1. compose the tree exactly as the next boot will ----------------------
 let dump = ''
-const patchArgs = ['--profile', 'web', '--patch', HOME_PATCH]
+// --profile takes CFG.PROFILE, not a literal: the gate must compose the SAME profile the launcher
+// will boot, or it validates a tree nobody is going to use. A literal 'web' here silently ignored
+// the configured profile name on any installation that set one.
+const patchArgs = ['--profile', CFG.PROFILE, '--patch', HOME_PATCH]
 for (const p of extraPatches) patchArgs.push('--patch', p)
 try {
-  dump = execFileSync(NODE, [BIN, ...patchArgs, '--dump-config'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  // DSH_HOME IS PASSED EXPLICITLY. Not doing so was a real defect, measured 2026-09-27: run the
+  // gate with DSH_HOME pointing at a directory that does not exist and it composed a DIFFERENT
+  // home's tree, lost its strongest check entirely (it printed "no local package exports
+  // resolvePolicy — byte comparison only") and still ended with "[PASS] 未发现确证不一致 —— 允许
+  // 启动". The launcher chain does not carry DSH_HOME, so an inherited stale value silently
+  // redirected the validation while the gate reported the verdict as if it had validated the
+  // configured home. The supervisor and the ladder already pass it this way; the gate did not.
+  dump = execFileSync(NODE, [BIN, ...patchArgs, '--dump-config'],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: { ...process.env, DSH_HOME: DSH_HOME } })
   pass('组合树可解析（dump-config 成功）')
 } catch (error) {
   fail(`组合失败：${String(error.stdout ?? error.stderr ?? error.message).split('\n')[0].slice(0, 160)}`,
@@ -131,10 +116,9 @@ for (const [depName, spec] of localDeps) {
     const mod = await import(pathToFileURL(`${installedDir}\\${entryRel}`).href)
     if (typeof mod.resolvePolicy !== 'function') continue
     validated += 1
-    const config = {}
-    for (const [k, v] of Object.entries(row.config)) {
-      config[k] = v === 'true' ? true : v === 'false' ? false : (/^\d+$/u.test(v) ? Number(v) : v)
-    }
+    // row.config is the config as the dump declared it, with YAML types preserved by parseRows, so
+    // the module sees the same object the host would hand it.
+    const config = row.config
     try {
       mod.resolvePolicy(config)
       validatedNames.add(depName)

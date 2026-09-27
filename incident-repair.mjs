@@ -23,6 +23,12 @@
  *                            [--no-ladder] [--dry-run]
  *   test-only: --force-l1-fail  --force-l15-fail   (skip a rung without calling a model)
  * Exit: 0 = a rung repaired it, 2 = setup problem, 3 = not repaired (guide written).
+ *
+ * FLAG SEMANTICS (both were wrong before 2026-09-27 and are now asserted by ci-test.mjs):
+ *   --dry-run    plan only. Spawns NO session and NO probe. Costs nothing. Previously it skipped
+ *                only the probe and still ran the session, so a "dry run" burned real tokens.
+ *   --no-ladder  collect evidence and stop. Starts no rung at all. Previously it gated L1.5 and
+ *                the guide but rung 1 still ran.
  */
 import * as CFG from './self-heal.config.mjs'
 import { execFileSync, spawn } from 'node:child_process'
@@ -31,6 +37,7 @@ import { closeSync, existsSync, openSync, readFileSync, readdirSync, statSync, w
 const NODE = CFG.NODE
 const BIN = CFG.BIN
 const HOME = CFG.HOME
+const PROFILE = CFG.PROFILE
 const HOME_PATCH = CFG.HOME_PATCH
 const INCIDENTS = CFG.INCIDENTS
 const SESSIONS = CFG.SESSIONS
@@ -101,7 +108,7 @@ const verdictOf = () => {
 function bootProbe() {
   const log = `${incident}\\boot-probe.log`
   writeFileSync(log, `(probe: port ${PROBE_PORT}, budget ${PROBE_BUDGET_MS / 1000}s)\n`, 'utf8')
-  const child = spawn(NODE, [BIN, '--profile', 'web', '--patch', HOME_PATCH, '--no-open', '--port', String(PROBE_PORT)], {
+  const child = spawn(NODE, [BIN, '--profile', PROFILE, '--patch', HOME_PATCH, '--no-open', '--port', String(PROBE_PORT)], {
     cwd: HOME, env: { ...process.env, DSH_HOME: HOME }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   })
   return new Promise((resolve) => {
@@ -182,9 +189,19 @@ function writeLadder(pending) {
 }
 
 async function runRung({ label, profile, forcedFail }) {
+  // --dry-run MUST NOT call a model. It used to skip only the probe (`dryRun ? … : await bootProbe()`)
+  // while still running the session, so a "dry run" spent real API tokens and launched an unattended
+  // agent — measured 2026-09-27: a probe test intended to be free started a headless repair session
+  // and had to be killed. Dry now means dry: record the plan, spawn nothing.
+  if (dryRun) {
+    rungs.push({ label, process: 'dry-run（未启动）', report: '—', probe: '（dry-run 未探测）', verdict: 'DRY-RUN（未尝试修复）' })
+    writeLadder(`${label} 已跳过（dry-run）`)
+    console.log(`[repair] ${label} → DRY-RUN：未启动会话（--dry-run 不花 token）`)
+    return false
+  }
   const r = await runDetached({ label, profile, forcedFail })
   const report = verdictOf()
-  const probe = dryRun ? '（dry-run 未探测）' : await bootProbe()
+  const probe = await bootProbe()
   const processText = r.ok ? 'ok' : `failed(exit=${r.code})`
   // CRITERION (relaxed by operator decision 2026-09-27): the BOOT PROBE decides. A missing or
   // inconclusive report is a warning, not a veto — if the composition boots, the operator can
@@ -198,7 +215,12 @@ async function runRung({ label, profile, forcedFail }) {
 }
 
 // ── rung 1: L1 ─────────────────────────────────────────────────────────────
-let repaired = await runRung({ label: 'L1 headless + 修复 overlay', profile: 'headless', forcedFail: flag('--force-l1-fail') })
+// `--no-ladder` did NOT stop this: the flag gated L1.5 and the guide but rung 1 ran unconditionally,
+// so "--no-ladder" still spent tokens and edited config unattended. Verbatim symptom, 2026-09-27:
+// a test run meant to exercise only the boot probe launched a headless repair session instead.
+let repaired = ladder
+  ? await runRung({ label: 'L1 headless + 修复 overlay', profile: 'headless', forcedFail: flag('--force-l1-fail') })
+  : false
 
 // ── rung 2: L1.5 factory profile ───────────────────────────────────────────
 if (ladder && !repaired) {
@@ -209,6 +231,12 @@ if (ladder && !repaired) {
   } else {
     repaired = await runRung({ label: 'L1.5 出厂 rescue profile + 修复 overlay', profile: 'rescue', forcedFail: flag('--force-l15-fail') })
   }
+}
+
+if (!ladder) {
+  rungs.push({ label: 'L1 / L1.5', process: 'disabled', report: '—', probe: '—', verdict: 'NOT-ATTEMPTED（--no-ladder）' })
+  writeLadder('已跳过修复阶梯（--no-ladder）')
+  console.log('[repair] --no-ladder：未启动任何修复会话（证据已收集，未尝试修复）')
 }
 
 // ── rung 3: the fixed guide at the fixed location ──────────────────────────
@@ -224,17 +252,26 @@ if (ladder && !repaired && !dryRun) {
 
 // ── final record ───────────────────────────────────────────────────────────
 writeLadder(guideWritten ? '已收尾：写通用说明' : '已收尾')
-const sessions = existsSync(SESSIONS)
+// "Newest session under $DSH_HOME" is only evidence of THIS run if this run actually started one.
+// After the dry-run fix it reported a session directory on a run that spawned nothing — a path from
+// an earlier run, printed as if it were the output of this one. Say which it is.
+const spawnedAnyRung = !dryRun && ladder
+const newestSession = existsSync(SESSIONS)
   ? readdirSync(SESSIONS, { withFileTypes: true }).filter((e) => e.isDirectory())
     .flatMap((e) => readdirSync(`${SESSIONS}\\${e.name}`, { withFileTypes: true })
       .filter((s) => s.isDirectory())
       .map((s) => `${SESSIONS}\\${e.name}\\${s.name}`))
     .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]
   : undefined
+const sessions = spawnedAnyRung ? newestSession : undefined
 
 console.log(`\n[repair] 阶梯：${rungs.map((r) => `${r.label}=${r.verdict}`).join(' → ')}`)
 console.log(`[repair] 修复报告：${existsSync(reportPath) ? reportPath : '未生成（视为 NEEDS-HUMAN）'}`)
 console.log(`[repair] 分级判定：${incident}\\ladder.md`)
 if (sessions !== undefined) console.log(`[repair] 完整修复会话记录：${sessions}（session.v3.jsonl.zstd）`)
+if (!spawnedAnyRung) {
+  console.log(`[repair] 本次未启动任何修复会话${dryRun ? '（--dry-run）' : '（--no-ladder）'}，所以没有属于本次的会话记录。`)
+  if (newestSession !== undefined) console.log(`[repair] （$DSH_HOME 下最近一次会话是 ${newestSession}，那是**早先某次**运行的，不是本次。）`)
+}
 if (guideWritten) console.log(`[repair] 通用说明：${CFG.FIXED}`)
 process.exit(repaired ? 0 : 3)

@@ -36,6 +36,11 @@ const check = (label, ok, detail) => {
 }
 const section = (t) => console.log(`\n${t}`)
 const sha = (p) => execFileSync(NODE, ['-e', `process.stdout.write(require('node:crypto').createHash('sha256').update(require('node:fs').readFileSync(${JSON.stringify(p)})).digest('hex'))`], { encoding: 'utf8' })
+
+/** The installer's own ship lists, read from source so the test cannot drift from them. */
+const installerSource = () => readFileSync(join(HERE, 'self-heal-install.mjs'), 'utf8')
+const installerFiles = () => [...(/const files = \[([^\]]*)\]/u.exec(installerSource())[1]).matchAll(/'([^']+)'/gu)].map((m) => m[1])
+const installerRepairFiles = () => [...(/const repairFiles = \[([^\]]*)\]/u.exec(installerSource())[1]).matchAll(/'([^']+)'/gu)].map((m) => m[1])
 const run = (args, opts = {}) => {
   try {
     return { code: 0, out: execFileSync(NODE, [join(HERE, 'self-heal-install.mjs'), ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts }) }
@@ -77,7 +82,10 @@ try {
   const first = run(['install', '--harness', HARNESS, '--home', HOME, '--launcher', LAUNCHER, '--no-verify'])
   check('installer exits 0', first.code === 0, `exit=${first.code}\n${first.out}`)
   check('no percent-encoding in its own path handling', !/%20/u.test(first.out), 'the .pathname bug is back')
-  check('reports 10/10 files copied', /套件文件 10\/10/u.test(first.out), first.out.split('\n').find((l) => l.includes('套件文件')))
+  // Derived, not hardcoded: hardcoding the count here means adding a shipped file breaks the test
+  // for the wrong reason and invites "just update the number" instead of checking the manifest.
+  const expectedTotal = (installerFiles().length) + (installerRepairFiles().length)
+  check(`reports ${expectedTotal}/${expectedTotal} files copied`, new RegExp(`套件文件 ${expectedTotal}/${expectedTotal}`, 'u').test(first.out), first.out.split('\n').find((l) => l.includes('套件文件')))
 
   section('2. every declared file actually landed')
   const kitFiles = ['start-gate.mjs', 'host-supervisor.mjs', 'incident-repair.mjs', 'write-host-down-readme.mjs', 'self-heal.config.mjs', 'self-heal-install.mjs']
@@ -169,6 +177,83 @@ try {
     check(`${f}: ${allowed} machine literal(s) tolerated`, hits.length <= allowed, `${hits.length} found: ${hits.map((l) => l.trim()).slice(0, 3).join(' | ')}`)
   }
 
+  section('9b. --dry-run and --no-ladder must not launch a repair session at all')
+  // THE REGRESSION THESE LOCK IN (measured 2026-09-27): `--no-ladder` gated only rung 2 and the
+  // guide, so rung 1 still ran; and `--dry-run` skipped only the probe, so it still ran the session.
+  // A "harmless probe test" therefore launched a real headless repair agent and spent API tokens,
+  // and had to be killed by hand. A dry run that costs money is worse than no dry run, because you
+  // reach for it precisely when you do not want to spend anything.
+  //
+  // Asserted by counting LAUNCHES, not by inspecting files: an implementation could plausibly leave
+  // other artifacts behind, but it cannot start a session without spawning the CLI.
+  const dryIncident = join(root, 'dry incident', '20260101-000000-exit1')
+  mkdirSync(dryIncident, { recursive: true })
+  writeFileSync(join(dryIncident, 'summary.md'), '# stub\n', 'utf8')
+  writeFileSync(join(dryIncident, 'console-tail.txt'), 'stub tail\n', 'utf8')
+  const spawnCounter = join(root, 'spawns.log')
+  writeFileSync(spawnCounter, '', 'utf8')
+
+  // A wrapper that records every `--profile` invocation (i.e. every attempt to start a dsh process)
+  // and then runs the real interpreter. A Node wrapper, not a .cmd: execFileSync cannot spawn a
+  // .cmd without a shell (EINVAL), and quoting through cmd.exe is its own source of lies. The
+  // wrapper passes the child's stdout/stderr and exit code straight through, so the run under test
+  // behaves exactly as it would with the real binary.
+  const WRAPPER = join(root, 'node-wrapper.mjs')
+  writeFileSync(WRAPPER, [
+    "import { appendFileSync } from 'node:fs'",
+    "import { spawnSync } from 'node:child_process'",
+    `const argv = process.argv.slice(2)`,
+    `if (argv[0] === '--profile') appendFileSync(${JSON.stringify(spawnCounter)}, argv.join(' ') + '\\n', 'utf8')`,
+    `const r = spawnSync(${JSON.stringify(NODE)}, argv, { stdio: 'inherit' })`,
+    'process.exit(r.status ?? 1)',
+    '',
+  ].join('\n'), 'utf8')
+
+  const ladderRun = (flags) => {
+    try {
+      return {
+        code: 0,
+        out: execFileSync(NODE, [join(HARNESS, 'config', 'incident-repair.mjs'), '--incident', dryIncident, ...flags], {
+          encoding: 'utf8',
+          env: { ...process.env, DSH_SELFHEAL_HARNESS: HARNESS, DSH_SELFHEAL_NODE: WRAPPER, DSH_SELFHEAL_INCIDENTS: join(root, 'dry incident') },
+        }),
+      }
+    } catch (error) { return { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` } }
+  }
+
+  const dry = ladderRun(['--dry-run'])
+  const drySpawns = readFileSync(spawnCounter, 'utf8').trim()
+  check('--dry-run exits 3 (not repaired) rather than 0', dry.code === 3, `exit=${dry.code}`)
+  check('--dry-run spawned NO dsh process', drySpawns === '', `spawns:\n${drySpawns}`)
+  check('--dry-run says it launched nothing', /未启动任何修复会话/u.test(dry.out), dry.out.slice(-200))
+  check('--dry-run records the plan in ladder.md', /DRY-RUN/u.test(readFileSync(join(dryIncident, 'ladder.md'), 'utf8')))
+  check('--dry-run creates no repair-live log', readdirSync(dryIncident).every((f) => !f.startsWith('repair-live')), readdirSync(dryIncident).join(', '))
+
+  writeFileSync(spawnCounter, '', 'utf8')
+  const noLadder = ladderRun(['--no-ladder'])
+  const noLadderSpawns = readFileSync(spawnCounter, 'utf8').trim()
+  check('--no-ladder exits 3 rather than claiming a repair', noLadder.code === 3, `exit=${noLadder.code}`)
+  check('--no-ladder spawned NO dsh process', noLadderSpawns === '', `spawns:\n${noLadderSpawns}`)
+  check('--no-ladder says so', /未启动任何修复会话/u.test(noLadder.out), noLadder.out.slice(-200))
+  check('--no-ladder records NOT-ATTEMPTED', /NOT-ATTEMPTED/u.test(readFileSync(join(dryIncident, 'ladder.md'), 'utf8')))
+
+  section('9c. the ladder follows the configured profile, not a literal')
+  // start-gate.mjs, host-supervisor.mjs and incident-repair.mjs all hardcoded `--profile web`
+  // despite the profile being configurable. The gate composing a profile nobody boots is the worst
+  // of the three: it would validate a tree the launcher never loads.
+  for (const f of ['start-gate.mjs', 'host-supervisor.mjs', 'incident-repair.mjs']) {
+    const text = readFileSync(join(HARNESS, 'config', f), 'utf8')
+    check(`${f} does not hardcode --profile web`, !/'--profile',\s*'web'/u.test(text), 'literal profile name found')
+  }
+  const installerText = readFileSync(join(HARNESS, 'config', 'self-heal-install.mjs'), 'utf8')
+  // Match the ASSIGNMENT, in a code position. Matching the bare phrase would hit the comment that
+  // explains this very fix — the "substring judgement catches prose" trap, which has already cost
+  // this project once.
+  const codeLines = installerText.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/u.test(l))
+  check('installer derives profile from the existing config, not a literal',
+    codeLines.some((l) => /previous\.profile/u.test(l)) && !codeLines.some((l) => /\bprofile: 'web'/u.test(l)),
+    codeLines.filter((l) => /\bprofile:/u.test(l)).map((l) => l.trim()).slice(0, 3).join(' | '))
+
   section('9. a missing incidents root is reported, not crashed on')
   const bare = join(root, 'bare incidents')
   // NOTE ON ENV PRECEDENCE: these two overrides are honoured even though the config FILE also names
@@ -240,6 +325,62 @@ try {
   check('it names the failure', /组合失败/u.test(noCli.out), noCli.out.slice(0, 200))
   check('it prints the one-shot bypass, not just a verdict', /DSH_SKIP_GATE=1/u.test(noCli.out), 'no bypass hint — the operator would be stuck')
   check('it still records a verdict line', existsSync(join(gateHome, 'state', 'gate.log')) || existsSync(join(root, 'gate.log')), 'no gate.log anywhere')
+
+  section('12. the gate reads config as REAL types, so it cannot refuse a healthy launch')
+  // The gate hands each installed module the config object built from the dump, so "the module
+  // accepted it" has to mean the same thing the host means. It used to store every value as the raw
+  // TEXT after the colon and coerce only true/false/^\d+$ — so `list: [a, b]` arrived as the string
+  // "[alpha, beta]", `neg: -7` as the string "-7", a float as a string, and a nested map as "". A
+  // type-checking module then threw and the gate REFUSED a launch the host accepts. Measured
+  // 2026-09-27 with a type-enforcing probe module: host composed fine, gate printed
+  //   TYPE MISMATCH: list is string; neg is string; float is string; nested is string
+  // A gate that refuses healthy launches is worse than no gate, and it hides well — a refusal looks
+  // like a strict gate doing its job. These assertions call the real parser the gate imports.
+  const { parseRows } = await import(new URL('./gate-parse.mjs', import.meta.url).href)
+  const dump = [
+    '- id: peak-guard',
+    "  name: 'dsh-plugin-peak-guard'",
+    '  config:',
+    '    storePath: D:/dsh/home/peak-guard/queue.json',
+    '    offPeakWeekends: true',
+    '    catchUpMs: 3000',
+    '    warningLead: -5',
+    '    ratio: 1.5',
+    '    zero: 0',
+    '    quotedNumber: "9"',
+    '    emptyList: []',
+    '    windows:',
+    '      - { startHour: 9, endHour: 12 }',
+    '      - { startHour: 14, endHour: 18 }',
+    '    gating:',
+    "      unknownModelPolicy: 'ask'",
+    '      retries: 2',
+    '',
+  ].join('\n')
+  const parsedDump = parseRows(dump)
+  check('the dump yields one row', parsedDump.length === 1, `got ${parsedDump.length}`)
+  const rowCfg = parsedDump[0]?.config ?? {}
+  check('booleans stay booleans', rowCfg.offPeakWeekends === true, typeof rowCfg.offPeakWeekends)
+  check('integers stay numbers', rowCfg.catchUpMs === 3000, `${typeof rowCfg.catchUpMs}`)
+  check('zero stays a number', rowCfg.zero === 0, `${typeof rowCfg.zero} ${JSON.stringify(rowCfg.zero)}`)
+  check('NEGATIVE numbers stay numbers', rowCfg.warningLead === -5, `${typeof rowCfg.warningLead} ${JSON.stringify(rowCfg.warningLead)}`)
+  check('FLOATS stay numbers', rowCfg.ratio === 1.5, `${typeof rowCfg.ratio} ${JSON.stringify(rowCfg.ratio)}`)
+  check('a quoted number stays a string', rowCfg.quotedNumber === '9', `${typeof rowCfg.quotedNumber} ${JSON.stringify(rowCfg.quotedNumber)}`)
+  check('ARRAYS stay arrays', Array.isArray(rowCfg.windows) && rowCfg.windows.length === 2, JSON.stringify(rowCfg.windows))
+  check('array elements stay objects', rowCfg.windows?.[0]?.startHour === 9, JSON.stringify(rowCfg.windows?.[0]))
+  check('EMPTY arrays stay empty arrays', Array.isArray(rowCfg.emptyList) && rowCfg.emptyList.length === 0, JSON.stringify(rowCfg.emptyList))
+  check('nested maps stay objects', rowCfg.gating?.unknownModelPolicy === 'ask', JSON.stringify(rowCfg.gating))
+  check('nested numbers stay numbers', rowCfg.gating?.retries === 2, `${typeof rowCfg.gating?.retries}`)
+  check('bare strings stay strings', rowCfg.storePath === 'D:/dsh/home/peak-guard/queue.json', String(rowCfg.storePath))
+
+  section('12b. the same parser is what the shipped gate actually runs')
+  // A parser that is correct in isolation but not wired into the gate would pass section 12 and
+  // still leave the bug in place, so assert the wiring too.
+  const gateText = readFileSync(join(HARNESS, 'config', 'start-gate.mjs'), 'utf8')
+  check('the gate imports the parser module', /from '\.\/gate-parse\.mjs'/u.test(gateText), 'start-gate.mjs does not import gate-parse.mjs')
+  check('the gate does not keep a second inlined copy', !/function parseRows/u.test(gateText), 'an inlined parseRows still exists alongside the module')
+  check('the gate passes row.config straight through', /const config = row\.config/u.test(gateText), 'the gate still rebuilds config by hand')
+  check('the parser module is shipped by the installer', existsSync(join(HARNESS, 'config', 'gate-parse.mjs')))
 } finally {
   if (process.env.SELFHEAL_CI_KEEP !== '1') rmSync(root, { recursive: true, force: true })
   else console.log(`\n(kept for inspection: ${root})`)

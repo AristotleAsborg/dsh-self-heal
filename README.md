@@ -91,6 +91,12 @@ Option B — by hand:
 
 # hand the newest incident to the repair ladder by hand
 node <harness>\config\incident-repair.mjs --ladder
+
+# see what the ladder WOULD do, without launching anything (costs nothing)
+node <harness>\config\incident-repair.mjs --dry-run
+
+# collect the evidence and stop, without attempting a repair
+node <harness>\config\incident-repair.mjs --no-ladder
 ```
 
 | Switch | Meaning |
@@ -100,6 +106,8 @@ node <harness>\config\incident-repair.mjs --ladder
 | `DSH_NO_REPAIR_AGENT=1` | Do not start the repair ladder automatically |
 | `DSH_SUPERVISOR_RELAUNCH=1` | Allow one relaunch after a successful repair |
 | `-GateOnly` | Run the gate and exit with its verdict |
+| `--dry-run` (ladder) | Plan only. Launches **no** session and no probe, so it costs nothing |
+| `--no-ladder` (ladder) | Collect evidence and stop. Starts no rung at all |
 
 ## Safety properties
 

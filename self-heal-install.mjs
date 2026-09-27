@@ -200,38 +200,49 @@ function writeCRLF(path, text) {
 }
 
 function writeConfig() {
+  // `profile` and `port` are read from the EXISTING config first, because they are exactly the kind
+  // of thing a deployment changes and the installer has no way to guess: a run on a machine using
+  // profile `tui` on port 4090 used to stamp `profile: 'web', port: 3080` over it, and every script
+  // that composes or probes a profile would then have watched the wrong one — silently, since the
+  // values are perfectly valid. `--profile` / `--port` override explicitly when given.
+  let previous = {}
+  if (existsSync(CONFIG)) {
+    try { previous = JSON.parse(readFileSync(CONFIG, 'utf8')) } catch { previous = {} }
+  }
+  if (typeof previous !== 'object' || previous === null || Array.isArray(previous)) previous = {}
+  const PROFILE = opt('--profile', previous.profile ?? 'web')
+  const PORT = Number(opt('--port', String(previous.port ?? 3080)))
+  const PROBE_PORT = Number(opt('--probe-port', String(previous.probePort ?? PORT + 1)))
   const config = {
     node: NODE, bin: `${HARNESS}\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js`,
-    home: HOME, profile: 'web', port: 3080, probePort: 3081,
+    home: HOME, profile: PROFILE, port: PORT, probePort: PROBE_PORT,
     log: `${HARNESS}\\dsh-console.log`, incidents: `${HOME}\\state\\incidents`,
     promptFile: `${HARNESS}\\config\\repair\\repair-prompt.md`,
     overlay: `${HARNESS}\\config\\repair\\repair-overlay.yml`,
     launcher: LAUNCHER,
   }
-  if (dryRun) { say('[dry-run] 将写 ' + CONFIG); return }
+  if (dryRun) { say(`[dry-run] 将写 ${CONFIG}（profile=${PROFILE} port=${PORT} probePort=${PROBE_PORT}）`); return }
   // MERGE, do not clobber. This file is explicitly documented as the one place a deployment
   // records where things live, and self-heal.config.mjs reads keys beyond this list (state,
   // attempts, gate, supervisor, ladder, guide, fixed, and the timeouts). Replacing the whole
   // file silently deleted any such key on every re-install — measured 2026-09-27: a `state`
   // key added by hand was gone after one install run, with no warning. Keys this function owns
   // are refreshed; everything else the deployment set is preserved and reported.
-  let previous = {}
-  if (existsSync(CONFIG)) {
-    try { previous = JSON.parse(readFileSync(CONFIG, 'utf8')) } catch { previous = {} }
-  }
-  if (typeof previous !== 'object' || previous === null || Array.isArray(previous)) previous = {}
   const preserved = Object.keys(previous).filter((k) => !Object.hasOwn(config, k))
   const merged = { ...previous, ...config }
   mkdirSync(`${HARNESS}\\config`, { recursive: true })
   writeFileSync(CONFIG, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
-  say(`[config] 已写 ${CONFIG}（脚本从这里取路径，不再硬编码）`)
+  say(`[config] 已写 ${CONFIG}（脚本从这里取路径，不再硬编码；profile=${PROFILE} port=${PORT}）`)
   if (preserved.length > 0) say(`[config] 保留了你自定义的键：${preserved.join(', ')}`)
 }
 
 function copyKit() {
   // EXPLICIT list. A wildcard here would ship every unrelated .mjs that happens to sit in the
-  // same directory (85 files in this checkout) — the kit is exactly these six.
-  const files = ['start-gate.mjs', 'host-supervisor.mjs', 'incident-repair.mjs', 'write-host-down-readme.mjs', 'self-heal.config.mjs', 'self-heal-install.mjs']
+  // same directory (85 files in this checkout) — the kit is exactly these.
+  // gate-parse.mjs is here because start-gate.mjs imports it; leaving it out would produce a gate
+  // that cannot start, while every file that IS copied still looked fine. The manifest verifier
+  // fails if this list and the directory ever drift apart.
+  const files = ['start-gate.mjs', 'gate-parse.mjs', 'host-supervisor.mjs', 'incident-repair.mjs', 'write-host-down-readme.mjs', 'self-heal.config.mjs', 'self-heal-install.mjs']
   // The repair/ directory is NOT optional, even though nothing imports it: writeConfig points
   // `promptFile` and `overlay` at these files, and incident-repair.mjs hard-exits (code 2) when
   // either is missing. This function copied only the .mjs files, so a fresh install produced a
