@@ -1,0 +1,8 @@
+node_modules/
+*.log
+*.tmp
+
+# local state produced by the kit at runtime
+state/
+incidents/
+HOST-DOWN-README.md

@@ -1,0 +1,37 @@
+# L1 repair overlay — the policy an UNATTENDED repair run works under.
+#
+# Applied as:  dsh --profile headless --patch <this file> headless "<repair prompt>"
+# with the process cwd set to D:\dsh\home.
+#
+# Why each row:
+#   sandbox-policy  workspace-write bounded to $DSH_HOME: the repair agent may edit
+#                   config/patch files inside the harness home, and the sandbox
+#                   denies every write outside it (including plugin sources under
+#                   D:\deepseek harness). A repair that needs to go wider must stop
+#                   and report — that is the whole point of the bound.
+#   approval        never: unattended runs have nobody to answer an ask. `never`
+#                   makes the answer deterministic (auto-reject) instead of hanging;
+#                   writes INSIDE the workspace never ask in the first place.
+#   telemetry/log   disabled: a repair run must not add egress. The home overlay
+#                   already disables both for the web profile; the headless profile
+#                   defaults telemetry to FEEDBACK_ONLY, so it is pinned off here.
+#
+# VERIFIED: `--dump-config` with this overlay must show the two policy rows below and
+# must not fail on a row id the headless profile does not have.
+
+- id: sandbox-policy
+  config:
+    mode: workspace-write
+    workspaceRoot: 'D:\dsh\home'
+
+- id: approval
+  config:
+    policy: never
+
+- id: session-telemetry-otel
+  config:
+    mode: DISABLED
+
+- id: session-log-deepseek
+  config:
+    enabled: false
