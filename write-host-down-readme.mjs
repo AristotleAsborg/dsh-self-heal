@@ -13,11 +13,12 @@
  * Usage: node write-host-down-readme.mjs [--incident <dir>] [--print]
  * Exit:  0 = written, 2 = the guide source is missing (nothing else can be done here).
  */
+import * as CFG from './self-heal.config.mjs'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 
-const GUIDE = 'D:\\dsh\\config\\repair\\HOST-DOWN-README.md'
-const FIXED = 'D:\\dsh\\HOST-DOWN-README.md'
-const INCIDENTS = 'D:\\dsh\\state\\incidents'
+const GUIDE = CFG.GUIDE
+const FIXED = CFG.FIXED
+const INCIDENTS = CFG.INCIDENTS
 
 const argv = process.argv.slice(2)
 const opt = (name, fallback) => {

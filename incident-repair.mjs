@@ -24,20 +24,21 @@
  *   test-only: --force-l1-fail  --force-l15-fail   (skip a rung without calling a model)
  * Exit: 0 = a rung repaired it, 2 = setup problem, 3 = not repaired (guide written).
  */
+import * as CFG from './self-heal.config.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 
-const NODE = 'D:\\dsh\\runtime\\node\\node.exe'
-const BIN = 'D:\\dsh\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
-const HOME = 'D:\\dsh\\home'
-const HOME_PATCH = `${HOME}\\cordis.patch.yml`
-const INCIDENTS = 'D:\\dsh\\state\\incidents'
-const SESSIONS = `${HOME}\\sessions`
-const OVERLAY = 'D:\\dsh\\config\\repair\\repair-overlay.yml'
-const PROMPT_FILE = 'D:\\dsh\\config\\repair\\repair-prompt.md'
-const GUIDE_WRITER = 'D:\\dsh\\config\\write-host-down-readme.mjs'
-const PROBE_PORT = 3081
-const PROBE_BUDGET_MS = 30000
+const NODE = CFG.NODE
+const BIN = CFG.BIN
+const HOME = CFG.HOME
+const HOME_PATCH = CFG.HOME_PATCH
+const INCIDENTS = CFG.INCIDENTS
+const SESSIONS = CFG.SESSIONS
+const OVERLAY = CFG.OVERLAY
+const PROMPT_FILE = CFG.PROMPT_FILE
+const GUIDE_WRITER = CFG.GUIDE_WRITER
+const PROBE_PORT = CFG.PROBE_PORT
+const PROBE_BUDGET_MS = CFG.PROBE_BUDGET_MS
 
 const argv = process.argv.slice(2)
 const opt = (name, fallback) => {

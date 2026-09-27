@@ -31,6 +31,23 @@ Paths are constants at the top of each script:
 
 ## Install
 
+Option A — the installer (recommended):
+
+```powershell
+node self-heal-install.mjs check      # show the resolved paths and what is missing
+node self-heal-install.mjs install    # --harness <dir> --home <dir> --launcher <file>
+```
+
+`install` writes `<harness>\config\self-heal.config.json` (every path lives there, so no script
+carries a hardcoded layout), copies the kit, wires your launcher — CRLF-only, idempotent, with a
+`.bak-selfheal-*` copy — so that a plain `start-dsh.cmd` wakes the gate, the supervisor and the
+L1 repair ladder (`DSH_SUPERVISOR_REPAIR_AGENT=1`, opt out with `DSH_NO_REPAIR_AGENT=1`), creates
+the factory fallback profile, and finally runs the gate to prove the result. If your launcher does
+not look like a DSH launcher it is left alone and a `start-dsh-self-heal.cmd` wrapper is written
+instead. `uninstall` removes the wiring block.
+
+Option B — by hand:
+
 1. Copy the `*.mjs` files to `<harness>\config\` and `repair/` to `<harness>\config\repair\`.
 2. Wire the launcher, see `launcher-integration.md`. In this checkout the gate runs before launch, the supervisor runs on a non-zero exit, and `DSH_SUPERVISOR_REPAIR_AGENT=1` is set by default so a crash reaches the repair ladder without a second launcher.
 3. Create the factory fallback profile once: `node <dsh bin.js> rescue --from-default-profile headless --dump-config`.
@@ -74,6 +91,8 @@ repair/repair-overlay.yml       policy for the repair session
 repair/repair-prompt.md         repair contract: allow-list, report path, stop conditions
 repair/HOST-DOWN-README.md      operator guide
 repair/plumbing-test-prompt.md  harmless prompt for testing the plumbing
+self-heal.config.mjs            one place where every path is resolved
+self-heal-install.mjs           option-A installer: config, copy, wire, fallback profile, verify
 launcher-integration.md         the launcher lines to add
 ```
 

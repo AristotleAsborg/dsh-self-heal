@@ -31,6 +31,21 @@
 
 ## 安装
 
+方式 A——用安装器（推荐）：
+
+```powershell
+node self-heal-install.mjs check      # 看解析出来的路径与缺什么
+node self-heal-install.mjs install    # --harness <dir> --home <dir> --launcher <file>
+```
+
+`install` 会写 `<harness>\config\self-heal.config.json`（**所有路径都在那里**，脚本里不再硬编码布局）、
+复制套件、给你自己的启动器接线（**只写 CRLF**、幂等、留 `.bak-selfheal-*` 备份），使**直接双击 `start-dsh.cmd`
+就能唤醒闸门、看护与 L1 修复阶梯**（默认 `DSH_SUPERVISOR_REPAIR_AGENT=1`，`DSH_NO_REPAIR_AGENT=1` 可关）、
+创建出厂兜底 profile，最后跑一次闸门作为交付验证。如果你的启动器不像 DSH 启动器，它**不会擅自修改**，
+而是生成 `start-dsh-self-heal.cmd` 包装脚本。`uninstall` 用于摘掉接线块。
+
+方式 B——手工接线：
+
 1. 把 `*.mjs` 复制到 `<harness>\config\`，把 `repair/` 复制到 `<harness>\config\repair\`。
 2. 按 `launcher-integration.md` 接线。本机是：启动前跑闸门、宿主非零退出后跑看护，并默认设 `DSH_SUPERVISOR_REPAIR_AGENT=1`，崩溃无需第二个启动器就能进入修复阶梯。
 3. 建一次出厂兜底 profile：`node <dsh bin.js> rescue --from-default-profile headless --dump-config`。
@@ -74,6 +89,8 @@ repair/repair-overlay.yml       修复会话的策略
 repair/repair-prompt.md         修复契约：允许清单、报告路径、停止条件
 repair/HOST-DOWN-README.md      人工排障说明
 repair/plumbing-test-prompt.md  管道自检用的无害提示词
+self-heal.config.mjs            统一路径解析（env → 配置文件 → 默认值）
+self-heal-install.mjs           选项 A 安装器：配置、复制、接线、兜底档、交付验证
 launcher-integration.md         启动器要加的接线
 ```
 

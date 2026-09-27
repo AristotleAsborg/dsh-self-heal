@@ -21,19 +21,20 @@
  * Read-only: it composes config, imports installed modules, compares bytes and reads
  * the tail of dsh-console.log. It never writes to the composition.
  */
+import * as CFG from './self-heal.config.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
-const NODE = 'D:\\dsh\\runtime\\node\\node.exe'
-const BIN = 'D:\\dsh\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
+const NODE = CFG.NODE
+const BIN = CFG.BIN
 const DSH_HOME = 'D:\\dsh\\home'
 const PROFILE = `${DSH_HOME}\\profiles\\web`
-const HOME_PATCH = `${DSH_HOME}\\cordis.patch.yml`
-const LOG = 'D:\\dsh\\dsh-console.log'
-const STATE = 'D:\\dsh\\state'
-const PORT = 3080
+const HOME_PATCH = CFG.HOME_PATCH
+const LOG = CFG.LOG
+const STATE = CFG.STATE
+const PORT = CFG.PORT
 
 const argv = process.argv.slice(2)
 const extraPatches = []

@@ -24,23 +24,24 @@
  * Usage: node host-supervisor.mjs --exit-code <n> [--repair] [--print] [--no-print]
  * Exit:  always 0 (the launcher owns the exit code).
  */
+import * as CFG from './self-heal.config.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 
-const NODE = 'D:\\dsh\\runtime\\node\\node.exe'
-const BIN = 'D:\\dsh\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
-const HOME = 'D:\\dsh\\home'
+const NODE = CFG.NODE
+const BIN = CFG.BIN
+const HOME = CFG.HOME
 const PROFILE = `${HOME}\\profiles\\web`
-const HOME_PATCH = `${HOME}\\cordis.patch.yml`
-const LOG = 'D:\\dsh\\dsh-console.log'
-const STATE = 'D:\\dsh\\state'
-const INCIDENTS = `${STATE}\\incidents`
-const ATTEMPTS = `${STATE}\\repairs\\attempts.json`
+const HOME_PATCH = CFG.HOME_PATCH
+const LOG = CFG.LOG
+const STATE = CFG.STATE
+const INCIDENTS = CFG.INCIDENTS
+const ATTEMPTS = CFG.ATTEMPTS
 const GATE = 'D:\\dsh\\config\\start-gate.mjs'
 
-const COOLDOWN_MS = 10 * 60 * 1000
-const MAX_ATTEMPTS = 1
-const TAIL_LINES = 200
+const COOLDOWN_MS = CFG.COOLDOWN_MS
+const MAX_ATTEMPTS = CFG.MAX_ATTEMPTS
+const TAIL_LINES = CFG.TAIL_LINES
 
 const argv = process.argv.slice(2)
 const opt = (name, fallback) => {
