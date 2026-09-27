@@ -1,0 +1,83 @@
+name: CI
+
+# WHY WINDOWS: every script in this kit is Windows-specific in ways that are load-bearing, not
+# cosmetic — cmd.exe batch semantics, CRLF-only launcher files, `cmd /c start`, Windows path
+# separators, and a native pnpm.exe. A Linux runner would exercise a different program.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Show environment
+        shell: pwsh
+        run: |
+          node --version
+          $PSVersionTable.PSVersion.ToString()
+
+      # Parse every shipped script. Cheap, and it catches a syntax error introduced by an edit that
+      # never got run — the kit has no build step, so nothing else would notice.
+      - name: Syntax check every kit script
+        shell: pwsh
+        run: |
+          $failed = @()
+          Get-ChildItem -Path . -Filter '*.mjs' -File | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $_.Name }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Error "syntax check failed: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host "all .mjs files parse"
+
+      # The script list and the manifest the installer ships must not drift apart: a file added to
+      # the kit but not to the copy list is installed nowhere, silently.
+      - name: Kit directory matches the installer's copy list
+        shell: pwsh
+        run: node .github/verify-manifest.mjs
+
+      # The main event. Runs the whole installer against a scratch harness whose path CONTAINS A
+      # SPACE, twice, plus the idempotency and config-preservation checks. That path shape is not
+      # incidental: the installer's worst bug (`.pathname` percent-encoding) was invisible on a
+      # checkout without a space and fatal on one with.
+      - name: End-to-end installer checks on a space-containing path
+        shell: pwsh
+        run: |
+          node ci-test.mjs 2>&1 | Tee-Object -FilePath ci-output.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Guard the property the kit promises and had broken: no script may carry a machine-specific
+      # layout. Matches the literal ONLY in code positions, so a comment that explains the rule
+      # (there are several) does not trip it.
+      - name: No machine-specific layout in code
+        shell: pwsh
+        run: node .github/verify-no-hardcoded-layout.mjs
+
+      - name: Keep the check output when something failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: ci-output.txt
+          if-no-files-found: ignore
+          retention-days: 7

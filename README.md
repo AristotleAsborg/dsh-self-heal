@@ -1,5 +1,7 @@
 # dsh-self-heal
 
+[![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
+
 English | [中文](README.zh-CN.md)
 
 Startup gate, crash supervisor and a bounded repair ladder for a DeepSeek Harness installation. Windows, Node 20+.
@@ -136,6 +138,38 @@ present**: the first three are essentially always there, while `ladder.md` only 
 `repair-report.md` is frequently absent (the repair session's workspace is `$DSH_HOME`, so its report normally
 lands in `$DSH_HOME\repair-<incident>\` and the supervisor copies it back on a best-effort basis). Do not use
 "all files present" as a health criterion.
+
+## Tests and CI
+
+`.github/workflows/ci.yml` runs on Windows (every script here depends on cmd.exe batch semantics,
+CRLF-only launcher files and a native pnpm.exe — a Linux runner would exercise a different program)
+and does four things:
+
+1. **Parse every shipped script** — there is no build step, so nothing else would notice a syntax error.
+2. **Check the kit directory against the installer's copy list**, in both directions. The installer
+   ships an explicit list, so adding a file does not ship it; `repair\` was silently never copied
+   while the config pointed straight at files inside it.
+3. **Run `ci-test.mjs`** — 55 checks that drive the real installer end to end.
+4. **Reject a machine-specific path in code** (comments excluded; the documented, overridable
+   defaults are allow-listed by exact text).
+
+`ci-test.mjs` is deliberately not a unit test. Run against a scratch harness whose path **contains a
+space**, it installs, asserts every declared file landed byte-identical, wires a launcher, then runs
+the whole thing **again** to prove the second run is a no-op — and mangles the launcher on purpose to
+prove a repeat run collapses it back to one copy instead of growing it. The two failure modes that
+mattered most (a percent-encoded `%20` path killing the copy, and wiring that grew the launcher on
+every run) are both invisible in a single run on an ordinary checkout, which is why they survived
+until someone ran the installer somewhere else.
+
+Run it locally with no dsh CLI required:
+
+```powershell
+node ci-test.mjs
+```
+
+Deliberately not covered by CI, because reaching it needs a real dsh installation: the gate's refusal
+of a composed row whose config the installed module rejects. That path is exercised on a real box —
+see the incident this kit exists for.
 
 ## License
 

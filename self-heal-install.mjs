@@ -43,6 +43,12 @@ const CONFIG = `${HARNESS}\\config\\self-heal.config.json`
 // failed exactly this way from D:\deepseek harness\self-heal-kit.
 const SRC = fileURLToPath(new URL('.', import.meta.url)).replace(/[\\/]+$/u, '')
 const dryRun = argv.includes('--dry-run')
+// Skip the two steps that need a real dsh CLI (factory `rescue` profile + gate verification).
+// WHY IT EXISTS: those steps cannot run on a machine that only has the kit — a CI runner, or a
+// "copy the files now, run the CLI later" install. Without this the installer could not be
+// exercised end-to-end anywhere except a full DSH box, which is precisely how the path/`%20`
+// and missing-`repair\` bugs survived: nothing ever ran it on a clean layout.
+const noVerify = argv.includes('--no-verify')
 const BEGIN = 'REM === dsh-self-heal BEGIN ==='
 const END = 'REM === dsh-self-heal END ==='
 
@@ -317,11 +323,17 @@ function uninstall() {
 }
 
 if (command === 'install') {
-  writeConfig(); copyKit(); wireLauncher(); rescueProfile(); verifyGate()
+  writeConfig(); copyKit(); wireLauncher()
+  if (noVerify) {
+    say('[skip] --no-verify：跳过出厂 profile 与闸门复验（需要真实 dsh CLI）')
+  } else {
+    rescueProfile(); verifyGate()
+  }
   if (problems.length > 0) {
     say(`\n安装未完成：${problems.length} 项失败。修好上面 [FAIL] 的项后重跑；不要以为已经装好了。`)
     process.exit(1)
   }
   say('\n完成。启动方式：双击 ' + (existsSync(`${HARNESS}\\start-dsh-self-heal.cmd`) ? 'start-dsh-self-heal.cmd' : LAUNCHER.split('\\').pop()))
+  if (noVerify) say('提示：还没跑闸门复验。在有 dsh CLI 的机器上重跑一次不带 --no-verify 的 install 即可验证。')
 } else if (command === 'uninstall') uninstall()
 else check()

@@ -1,5 +1,7 @@
 # dsh-self-heal
 
+[![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
+
 [English](README.md) | 中文
 
 给 DeepSeek Harness 用的启动闸门、崩溃看护与有界修复阶梯。Windows，Node 20+。
@@ -125,6 +127,31 @@ launcher-integration.md         启动器要加的接线
 `boot-probe.log`、`repair-live-<n>.log`、`repair-report.md`。**它们不是每次都齐**：`gate.txt`/`console-tail.txt`/`dump-config.txt`
 基本总在，而 `ladder.md` 只有跑过阶梯的事故才有，`repair-report.md` 更是常常没有（修复会话的工作区是 `$DSH_HOME`，
 报告通常写在 `$DSH_HOME\repair-<事故>\` 下，看护会尝试回拷一份）。所以**别用"文件齐备"当判据**。
+
+## 测试与 CI
+
+`.github/workflows/ci.yml` 跑在 **Windows** 上（本套件每个脚本都依赖 cmd.exe 批处理语义、
+只能 CRLF 的启动器文件和原生 `pnpm.exe`——换 Linux runner 测的就是另一个程序了），做四件事：
+
+1. **逐个解析所有出货脚本**：本仓库没有构建步骤，否则语法错误没有任何东西会发现；
+2. **把套件目录与安装器的复制清单双向比对**：安装器用的是显式清单，往目录里加文件**不等于**会被安装——
+   `repair\` 就曾经一个都没被复制，而配置正指向它里面的文件；
+3. **跑 `ci-test.mjs`**：55 项检查，端到端驱动真实的安装器；
+4. **拒绝代码里出现机器相关路径**（注释除外；那几个有文档、可覆盖的默认值按原文白名单放行）。
+
+`ci-test.mjs` 刻意不是单元测试。它在一个**路径含空格**的临时 harness 上真装一遍、断言每个声明的文件
+逐字节到位、给启动器接线，然后**再装一遍**证明第二次是空操作；还会故意把启动器改乱，证明重跑是把它
+折叠回一份、而不是继续变长。当初最要命的两个失效模式（`%20` 路径让复制整个失败、接线每跑一次就变长）
+在普通检出目录上只跑一次**都看不见**——这正是它们能活到"换台机器跑一次"才暴露的原因。
+
+本机跑它不需要 dsh CLI：
+
+```powershell
+node ci-test.mjs
+```
+
+**CI 刻意不覆盖**（要碰它必须有真实 dsh 安装）：闸门对"组合出来的行、其配置被安装副本拒绝"的拦截。
+那条路径在真机上验证过——见本套件为之而生的那次事故。
 
 ## 许可证
 
