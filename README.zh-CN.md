@@ -153,6 +153,87 @@ node ci-test.mjs
 **CI 刻意不覆盖**（要碰它必须有真实 dsh 安装）：闸门对"组合出来的行、其配置被安装副本拒绝"的拦截。
 那条路径在真机上验证过——见本套件为之而生的那次事故。
 
+## 正常运转的表现
+
+下面每条都是**实测样例**，不是示意图。先拿它当"这套装置是不是健康的"参照，再去看排查表。
+
+**闸门每次运行往 `$DSH_HOME\state\gate.log` 追加恰好一行**：
+
+```
+[gate] PASS 2026-09-27T12:31:52.356Z failures=0 warnings=1
+```
+
+关键是 `failures=0`。`warnings=1` 通常就是"端口 3080 已被 PID … 占用"这条提示——只要宿主已经开着，
+它就正常。出现 `failures=<n>` 才是闸门**拒绝启动**；同一次运行的标准输出会逐条点名失败项，
+并在每条下面打印修法。
+
+**健康的启动会 announce 自己的 URL 并留在那儿。** 实测约一秒：
+
+```
+dsh web: http://127.0.0.1:3080/?token=…
+```
+
+这一行是唯一可靠的"它起来了"信号。退出码给不出这个信息——所以本套件的判定一律是**启动探针**，
+而不是返回值。
+
+**"某一行是好的"这种输出是要读的，不是噪音**：
+
+```
+[PASS] 组合树可解析（dump-config 成功）
+[PASS] 行 selfheal（dsh-plugin-selfheal）的配置被安装副本接受：{"enabled":true,"allowRepair":false}
+[PASS] 未发现确证不一致 —— 允许启动
+```
+
+注意第二种形态：闸门会**导入每个已安装的本地包、用组合出来的 config 调它的 `resolvePolicy`**。
+不导出 `resolvePolicy` 的包则会得到下面这条——闸门如实说明自己的覆盖面，而不是暗示自己查过了：
+
+```
+[WARN] 没有任何本地包导出 resolvePolicy —— 本次只做了字节一致性检查（覆盖面有限，如实记录）
+```
+
+**看护每个事故记一行**到 `$DSH_HOME\state\supervisor.log`：
+
+```
+[supervisor] incident=…\20260927110428-exit4 classes=entry-failure actions=3 2026-09-27T11:07:15.486Z
+```
+
+**事故包的文件不是齐的**——别拿"文件齐备"当判据。一个真实的、成功的事故包：
+
+```
+boot-probe.log  console-tail.txt  dump-config.txt  gate.txt
+ladder.md  ladder-live.log  repair-live-1.log  repair-task.txt  summary.md
+```
+
+`gate.txt`、`console-tail.txt`、`dump-config.txt` 基本总在；`ladder.md` 只有跑过阶梯才有。
+`repair-report.md` **常常不在包里**——修复会话的工作区是 `$DSH_HOME`，报告通常落在
+`$DSH_HOME\repair-<事故>\` 下，看护只是尽力回拷一份。这就是"报告缺失只记警告、不算失败"的原因：
+判定依据是启动探针。
+
+**阶梯的判定是一张小表**，`REPAIRED` 由**启动探针**那一列决定，而不是报告列——两列不一致是正常的：
+
+```
+| 级                        | 进程 | 报告                | 启动探针              | 判定     |
+| L1 headless + 修复 overlay | ok   | NEEDS-HUMAN(无报告) | ALIVE（已 announce URL） | REPAIRED |
+```
+
+## 排查
+
+| 症状 | 含义与做法 |
+| --- | --- |
+| `[dsh] startup gate REFUSED to launch` | 最常见也最好修。每条 `[FAIL]` 后面都跟着 `→ <修复命令>`，照着跑再 `-GateOnly` 复验。只想先进去一次：`set DSH_SKIP_GATE=1`。 |
+| `行 X（包名）配置被安装副本拒绝：unknown config key "K"` | 组合出来的 config 带了一个安装副本不接受的键。装载器把"条目失败"当致命错误，所以宿主会在启动一秒内退出。把该键从这一行的 `config` 里删掉（或禁用该行），再用 `-GateOnly` 复验。 |
+| `安装副本与源码不一致：包\文件` | 安装副本与源码漂移了。在 `<home>\profiles\<配置档>` 里跑 `pnpm install`（或让看护的 `pnpm install` 去做），然后复验。 |
+| `组合失败：…` | 组合这棵树本身就失败了——下一次启动会撞上同一件事。闸门会拒绝并打印绕过方式。**先读完整报错原文**，不要默认是闸门自己的问题。 |
+| 宿主启动后一秒内退出 | 打开最新事故包里的 `console-tail.txt`，**逐字引用报错再下结论**。装载器里一个条目失败即致命，所以真正的起因通常就是它最后点名的那一行。 |
+| `incident-repair: 没有事故目录（…）` | 没有可修的事故。退出码 2，什么都没尝试。不是错误。 |
+| 阶梯跑过，但包里没有 `repair-report.md` | 正常，且只记警告。判定依据是 `boot-probe.log` 里的启动探针；见上面的包结构。 |
+| 崩溃后启动窗口瞬间关闭 | 设了 `DSH_NO_PAUSE=1` 就会这样（设计如此）。去掉它，窗口会留住，闸门输出就能在原地看。 |
+| 控制台里中文"像印了两遍" | 控制台代码页（CP936）造成的显示问题，**不是文件坏了**。启动器里已经有 `chcp 65001`；你自己直接调脚本时也先跑一次它。磁盘上是 UTF-8。 |
+| 事故包在 `<harness>\state\incidents`，而配置写的是 `<home>\state\incidents` | 2026-09-27 的布局变更留下了两个 state 根。把配置里的 `state`（或 `incidents`）指向你事故包真实所在；安装器**保留**这两个键，不会覆盖。 |
+
+先跑 `repair/HOST-DOWN-README.md` 里那两条只读命令——那就是自动四级全败之后给人看的同一份指引，
+而且它不删任何东西。
+
 ## 许可证
 
 MIT

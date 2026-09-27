@@ -171,6 +171,92 @@ Deliberately not covered by CI, because reaching it needs a real dsh installatio
 of a composed row whose config the installed module rejects. That path is exercised on a real box —
 see the incident this kit exists for.
 
+## What normal looks like
+
+Everything below is an observed example, not an illustration. Use it as the reference for "is this
+installation healthy?" before reaching for the troubleshooting table.
+
+**The gate appends exactly one line per run** to `$DSH_HOME\state\gate.log`:
+
+```
+[gate] PASS 2026-09-27T12:31:52.356Z failures=0 warnings=1
+```
+
+`failures=0` is the part that matters. `warnings=1` is routinely the "port 3080 is already held by
+PID …" advisory — normal whenever a host is already running. A `failures=<n>` line means the gate
+**refused**; the same run's stdout names each failing item and prints the fix under it.
+
+**A healthy boot announces its URL and stays up.** In practice about one second in:
+
+```
+dsh web: http://127.0.0.1:3080/?token=…
+```
+
+That single line is the only reliable "it booted" signal. An exit code cannot tell you this, which is
+why the kit's verdicts are boot probes rather than return values.
+
+**Being told a row is fine is normal output you should read**, not noise:
+
+```
+[PASS] 组合树可解析（dump-config 成功）
+[PASS] 行 selfheal（dsh-plugin-selfheal）的配置被安装副本接受：{"enabled":true,"allowRepair":false}
+[PASS] 未发现确证不一致 —— 允许启动
+```
+
+Note the second shape: the gate **imports each installed local package and calls its `resolvePolicy`**
+with the composed config. A package that exports no `resolvePolicy` gets this instead, and the gate
+says so rather than implying coverage it does not have:
+
+```
+[WARN] 没有任何本地包导出 resolvePolicy —— 本次只做了字节一致性检查（覆盖面有限，如实记录）
+```
+
+**The supervisor records one line per incident** in `$DSH_HOME\state\supervisor.log`:
+
+```
+[supervisor] incident=…\20260927110428-exit4 classes=entry-failure actions=3 2026-09-27T11:07:15.486Z
+```
+
+**An incident package is not uniformly populated** — do not use "all files present" as a criterion.
+A real, successful one:
+
+```
+boot-probe.log  console-tail.txt  dump-config.txt  gate.txt
+ladder.md  ladder-live.log  repair-live-1.log  repair-task.txt  summary.md
+```
+
+`gate.txt`, `console-tail.txt` and `dump-config.txt` are essentially always there; `ladder.md` only
+if the ladder ran. `repair-report.md` is frequently **absent from the package** — the repair session
+works inside `$DSH_HOME`, so its report normally lands in `$DSH_HOME\repair-<incident>\` and the
+supervisor copies it back on a best-effort basis. That is why a missing report is a warning and not a
+failure: the verdict is the boot probe.
+
+**The ladder's verdict is a small table**, and `REPAIRED` is decided by the probe column, not the
+report column — the two legitimately disagree:
+
+```
+| 级                        | 进程 | 报告                | 启动探针              | 判定     |
+| L1 headless + 修复 overlay | ok   | NEEDS-HUMAN(无报告) | ALIVE（已 announce URL） | REPAIRED |
+```
+
+## Troubleshooting
+
+| Symptom | What it means, and what to do |
+| --- | --- |
+| `[dsh] startup gate REFUSED to launch` | The most common and most fixable. Every `[FAIL]` line is followed by `→ <fix command>`; run it and re-run `-GateOnly`. For a one-shot bypass: `set DSH_SKIP_GATE=1`. |
+| `行 X（包名）配置被安装副本拒绝：unknown config key "K"` | The composed config carries a key the installed module rejects. The loader treats that as fatal, so the host would exit within a second of launch. Remove the key from that row's `config`, or disable the row; re-check with `-GateOnly`. |
+| `安装副本与源码不一致：包\文件` | The installed copy drifted from its source. Run `pnpm install` in `<home>\profiles\<profile>` (or let the supervisor's `pnpm install` do it) and re-check. |
+| `组合失败：…` | Composing the tree itself failed — the next boot would hit the same thing. The gate refuses and prints the bypass. Read the full error; do not assume it is the gate's fault. |
+| Host exits within a second of launch | Read `console-tail.txt` in the newest incident package and **quote the error verbatim before concluding anything**. A failing loader entry is fatal, so the real cause is usually the last entry named. |
+| `incident-repair: 没有事故目录（…）` | No incident exists to repair. Exit code 2, nothing was attempted. Not an error. |
+| Ladder ran but `repair-report.md` is missing | Expected and only a warning. The verdict is the boot probe in `boot-probe.log`; see the package layout above. |
+| Launcher window closes instantly after a crash | By design once `DSH_NO_PAUSE=1` is set. Unset it to keep the window and read the gate's output in place. |
+| `chcp`/mojibake: Chinese text looks doubled in the console | A console code-page artifact (CP936), not file corruption. The launcher already runs `chcp 65001`; if you invoke a script yourself, do the same. The files on disk are UTF-8. |
+| Incident packages are in `<harness>\state\incidents` but the config says `<home>\state\incidents` | Two state roots, from a layout change on 2026-09-27. Point the config's `state` (or `incidents`) key at where your packages really are; the installer preserves both keys rather than overwriting them. |
+
+Start from the two read-only commands in `repair/HOST-DOWN-README.md`; it is the same guidance a human
+gets when every automatic rung has failed, and it never deletes anything.
+
 ## License
 
 MIT
