@@ -73,6 +73,20 @@ jobs:
         shell: pwsh
         run: node .github/verify-no-hardcoded-layout.mjs
 
+      # gate-parse.mjs is a hand-written reader for the composed dump, and a fixture of our own proves
+      # only that the plumbing works. This compares it against the real `yaml` package on the four shapes
+      # that actually broke it (quoted names, !!js tags, block scalars, sequences of maps).
+      #
+      # The same harness also runs against a LIVE composed dump, which is strictly better because it also
+      # catches a change in the dump FORMAT — but that needs a real dsh install, so it lives outside CI:
+      #     node diff-parse.mjs <dump.txt> --cli <dsh lib/bin.js>
+      # Run it after upgrading dsh. It prints SKIP (never a false pass) when `yaml` cannot be resolved.
+      - name: Differential test of the dump reader (vs the real yaml package)
+        shell: pwsh
+        run: |
+          node diff-parse.mjs --self-test 2>&1 | Tee-Object -FilePath diff-self.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Keep the check output when something failed
         if: failure()
         uses: actions/upload-artifact@v4

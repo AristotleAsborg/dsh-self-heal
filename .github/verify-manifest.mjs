@@ -44,7 +44,7 @@ for (const f of repairFiles ?? []) {
 
 // 2. Nothing at the top level that IS meant to be installed may be missing from the list.
 //    Files that are deliberately NOT installed must be named here, so silence is never accidental.
-const NOT_INSTALLED = new Set(['ci-test.mjs'])
+const NOT_INSTALLED = new Set(['ci-test.mjs', 'diff-parse.mjs'])
 const topLevel = readdirSync(ROOT).filter((f) => f.endsWith('.mjs'))
 for (const f of topLevel) {
   if (NOT_INSTALLED.has(f)) continue

@@ -179,6 +179,39 @@ Deliberately not covered by CI, because reaching it needs a real dsh installatio
 of a composed row whose config the installed module rejects. That path is exercised on a real box —
 see the incident this kit exists for.
 
+### The dump reader, and why it is compared rather than sampled
+
+`gate-parse.mjs` reads the composed `--dump-config` output so the gate can hand each module the same
+config object the host would. It is hand-written (the gate must run with nothing but the CLI's own
+`node_modules` present), which makes it exactly the kind of code that looks right and is not.
+
+It was originally checked against a fixture of our own — and that fixture passed while the reader was
+wrong in four separate ways. Comparing it against the real `yaml` package over a real 657-line dump
+found all four within minutes:
+
+| Defect | What it did |
+| --- | --- |
+| `name:` kept its quotes | `row.name === depName` never matched, so the gate's per-row config validation was **silently skipped** — the very check that exists to catch config/code drift |
+| `!!js` tags kept as text | a JS-valued config compared unequal to itself |
+| block scalars (`>-`, `|`) unhandled | the value became the literal marker `">-"`, **silently replacing a long prompt with two characters** |
+| sequences of maps lost their keys | `models: [- id: x]` became the strings `"id: x"`; and a row-boundary detector that matched `- id:` inside a row's own nested list made one row swallow every row after it (83 of 172 rows vanished) |
+
+The middle two are why this is worth reading about: both produced a **quietly wrong string**, and a
+quietly wrong string is the worst possible outcome for a check whose whole job is to decide whether a
+config is acceptable. A loud crash would have been found immediately.
+
+```powershell
+# frozen fixtures, needs no dsh — this is what CI runs
+node diff-parse.mjs --self-test
+
+# the real thing: compare against a LIVE dump (run this after upgrading dsh)
+node diff-parse.mjs <dump.txt> --cli <dsh>/lib/bin.js
+```
+
+The live comparison needs a real dsh install, so CI runs the fixtures and the live form is documented
+here instead of being faked in the workflow. Both print `SKIP` — never a false pass — when `yaml`
+cannot be resolved, and say plainly that the run proves nothing.
+
 ## What normal looks like
 
 Everything below is an observed example, not an illustration. Use it as the reference for "is this
