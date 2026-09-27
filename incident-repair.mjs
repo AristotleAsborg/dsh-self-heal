@@ -14,9 +14,9 @@
  *     ladder still records how far it got.
  *
  *  2. A VERDICT MUST BE AN OUTCOME, NOT AN EXIT CODE. A rung that exited 0 having changed
- *     nothing was recorded "ok" while the same record said "no report". A rung now counts as
- *     repaired only when BOTH hold: the agent wrote repair-report.md, AND a real boot probe of
- *     the repaired composition (scratch port, hard timeout) survived.
+ *     nothing was recorded "ok" while the same record said "no report". The verdict is now the
+ *     real boot probe of the repaired composition (scratch port, hard timeout): ALIVE means the
+ *     operator can restart, and a missing agent report is only a warning.
  *
  * Usage:
  *   node incident-repair.mjs [--incident <dir>] [--prompt <file>] [--timeout-mins 10]
@@ -165,7 +165,7 @@ function writeLadder(pending) {
     `# 修复阶梯结果（${pending}）`,
     '',
     `- 事故目录：${incident}`,
-    '- 判据：**代理报告 + 启动探针**（进程退出码不算数）',
+    '- 判据：**启动探针**（能启动即算修好；报告缺失只记警告；进程退出码不算数）',
     '',
     '| 级 | 进程 | 报告 | 启动探针 | 判定 |',
     '| --- | --- | --- | --- | --- |',
@@ -179,10 +179,14 @@ async function runRung({ label, profile, forcedFail }) {
   const report = verdictOf()
   const probe = dryRun ? '（dry-run 未探测）' : await bootProbe()
   const processText = r.ok ? 'ok' : `failed(exit=${r.code})`
-  const repaired = r.ok && existsSync(reportPath) && /^(ALIVE|READY)/u.test(probe)
+  // CRITERION (relaxed by operator decision 2026-09-27): the BOOT PROBE decides. A missing or
+  // inconclusive report is a warning, not a veto — if the composition boots, the operator can
+  // restart, which is the only question this ladder exists to answer.
+  const repaired = /^ALIVE/u.test(probe)
+  const warnText = existsSync(reportPath) ? '' : '（无报告：警告，不否决）'
   rungs.push({ label, process: processText, report, probe, verdict: repaired ? 'REPAIRED' : 'NOT-REPAIRED' })
   writeLadder(`${label} 已结束`)
-  console.log(`[repair] ${label} → 进程 ${processText}；报告 ${report}；启动探针 ${probe} ⇒ ${repaired ? 'REPAIRED ✓' : 'NOT-REPAIRED'}`)
+  console.log(`[repair] ${label} → 进程 ${processText}；报告 ${report}；启动探针 ${probe} ⇒ ${repaired ? 'REPAIRED ✓' : 'NOT-REPAIRED'}${warnText}`)
   return repaired
 }
 
