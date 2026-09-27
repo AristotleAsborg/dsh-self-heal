@@ -23,7 +23,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 const NODE = 'D:\\dsh\\runtime\\node\\node.exe'
@@ -32,6 +32,7 @@ const DSH_HOME = 'D:\\dsh\\home'
 const PROFILE = `${DSH_HOME}\\profiles\\web`
 const HOME_PATCH = `${DSH_HOME}\\cordis.patch.yml`
 const LOG = 'D:\\dsh\\dsh-console.log'
+const STATE = 'D:\\dsh\\state'
 const PORT = 3080
 
 const argv = process.argv.slice(2)
@@ -196,9 +197,23 @@ if (!quiet) {
   }
 }
 const verdict = failed.length === 0 ? 'PASS' : 'REFUSED'
+// The verdict always lands in a file the gate owns. Appending to the launcher's console
+// log is BEST-EFFORT: while the host runs, the launcher holds that file open and
+// appendFileSync fails (EBUSY/EPERM). The first version swallowed that in an empty catch,
+// so the gate ran for a whole session without leaving a single line — a silent
+// diagnostic failure, which is worse than a missing convenience.
+const verdictLine = `[gate] ${verdict} ${new Date().toISOString()} failures=${failed.length} warnings=${findings.filter((f) => f.level === 'WARN').length}`
 try {
-  appendFileSync(LOG, `[gate] ${verdict} ${new Date().toISOString()} failures=${failed.length} warnings=${findings.filter((f) => f.level === 'WARN').length}\n`, 'utf8')
-} catch { /* the log is a convenience, never a reason to block */ }
+  mkdirSync(STATE, { recursive: true })
+  appendFileSync(`${STATE}\\gate.log`, `${verdictLine}\n`, 'utf8')
+} catch (error) {
+  console.error(`[gate] 无法写入 ${STATE}\\gate.log：${String(error.message).slice(0, 120)}`)
+}
+try {
+  appendFileSync(LOG, `${verdictLine}\n`, 'utf8')
+} catch (error) {
+  if (!quiet) console.log(`  [note] 判定未能写入 dsh-console.log（${String(error.code ?? error.message).slice(0, 40)}）—— 已记入 ${STATE}\\gate.log`)
+}
 
 if (failed.length > 0) {
   console.log(`\n[dsh] 闸门拦停：${failed.length} 项确证不一致。修好上面的项，或临时用  set DSH_SKIP_GATE=1  跳过闸门。`)
