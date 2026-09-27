@@ -16,16 +16,28 @@ Startup gate, crash supervisor and a bounded repair ladder for a DeepSeek Harnes
 
 ## Requirements and expected layout
 
-Paths are constants at the top of each script:
+Paths are **not** hardcoded constants inside the scripts: every script resolves them through
+`self-heal.config.mjs`, which reads `environment → <harness>\config\self-heal.config.json → default`.
+The installer writes that JSON as the single source of truth, so moving to another machine means
+re-running the installer (or editing that one file) rather than editing code.
 
-| Constant | This checkout |
+| Key / value | This checkout |
 | --- | --- |
-| harness root / launcher | `D:\dsh` |
-| `$DSH_HOME` | `D:\dsh\home` |
-| profiles | `$DSH_HOME\profiles\web`, `headless`, `rescue` |
-| host log / gate log | `D:\dsh\dsh-console.log`, `$DSH_HOME\state\gate.log` |
-| incident bundles | `$DSH_HOME\state\incidents\<timestamp>-exit<N>\` |
-| repair probe port | 3081 |
+| harness root `harnessRoot` (`--harness`) | `D:\dsh` |
+| `$DSH_HOME` (`home`) | `D:\dsh\home` |
+| profile `profile` | `web` |
+| host log `log` / gate log `state\gate.log` | `D:\dsh\dsh-console.log`, `$DSH_HOME\state\gate.log` |
+| incident bundles `incidents` | `$DSH_HOME\state\incidents\<timestamp>-exit<N>\` |
+| repair probe port `probePort` | 3081 |
+
+Overridable environment variables: `DSH_SELFHEAL_HARNESS` (harness root) and `DSH_SELFHEAL_NODE`
+(the node interpreter). Any other key is overridden as `DSH_SELFHEAL_<KEY>`, e.g.
+`DSH_SELFHEAL_STATE`, `DSH_SELFHEAL_INCIDENTS`.
+
+> **Upgrade note**: releases before 2026-09-27 wrote `state` and incident bundles under
+> `<harness>\state\`, while the kit config defaults to `$DSH_HOME\state\`. If you have older
+> bundles in `<harness>\state\incidents\`, add an explicit `"state"` (or `"incidents"`) key to the
+> JSON pointing at them — the installer **preserves** both keys rather than overwriting them.
 
 `DSH_HOME` is passed explicitly to every child process: the launcher's environment does not carry it, and without it the CLI silently composes a different installation's home.
 
@@ -45,6 +57,23 @@ L1 repair ladder (`DSH_SUPERVISOR_REPAIR_AGENT=1`, opt out with `DSH_NO_REPAIR_A
 the factory fallback profile, and finally runs the gate to prove the result. If your launcher does
 not look like a DSH launcher it is left alone and a `start-dsh-self-heal.cmd` wrapper is written
 instead. `uninstall` removes the wiring block.
+
+The installer is **idempotent and self-converging**: re-running it leaves the launcher byte-identical,
+and a launcher that a human has mangled (say, with the wiring block duplicated several times) is
+collapsed back to exactly one copy before it exits. `install` refreshes only the config keys it owns —
+**keys you added to the JSON yourself are preserved and reported**, never silently dropped.
+
+After wiring, prove it in one read-only step (runs the gate, does not start the host):
+
+```powershell
+$env:DSH_NO_PAUSE=1; cmd /c "D:\dsh\start-dsh.cmd -GateOnly"
+```
+
+Two bugs fixed here, both of which made the installer lie about success: it derived its own
+directory from `import.meta.url`'s `.pathname`, which is percent-encoded, so any path containing a
+space became `%20` and the kit copy died with `ENOENT` — **half-installed: config written, scripts
+not copied**. And the launcher lookup for `start-dsh.ps1` also matched a *comment* line, so each run
+inserted one more wiring block.
 
 Option B — by hand:
 
@@ -92,11 +121,21 @@ repair/repair-prompt.md         repair contract: allow-list, report path, stop c
 repair/HOST-DOWN-README.md      operator guide
 repair/plumbing-test-prompt.md  harmless prompt for testing the plumbing
 self-heal.config.mjs            one place where every path is resolved
-self-heal-install.mjs           option-A installer: config, copy, wire, fallback profile, verify
+self-heal-install.mjs           option-A installer: config, copy (incl. repair\), wire, fallback profile, verify
 launcher-integration.md         the launcher lines to add
 ```
 
-An incident directory holds `summary.md`, `console-tail.txt`, `gate.txt`, `dump-config.txt`, `ladder.md`, `boot-probe.log`, `repair-live-<n>.log` and, when one was produced, `repair-report.md`.
+`repair\HOST-DOWN-README.md` uses `{{HARNESS}}`, `{{HOME}}`, `{{INCIDENTS}}`, `{{CLI}}` and friends instead of
+literal paths; `write-host-down-readme.mjs` substitutes them from the live config when it writes the guide
+(an unknown placeholder is left visible and reported). One source file therefore yields **correct** paths on
+any layout — the previously hardcoded version pointed at the wrong directory once the state root moved.
+
+An incident directory holds `summary.md`, `console-tail.txt`, `gate.txt`, `dump-config.txt` and, when they were
+produced, `ladder.md`, `boot-probe.log`, `repair-live-<n>.log`, `repair-report.md`. **They are not uniformly
+present**: the first three are essentially always there, while `ladder.md` only exists if the ladder ran and
+`repair-report.md` is frequently absent (the repair session's workspace is `$DSH_HOME`, so its report normally
+lands in `$DSH_HOME\repair-<incident>\` and the supervisor copies it back on a best-effort basis). Do not use
+"all files present" as a health criterion.
 
 ## License
 

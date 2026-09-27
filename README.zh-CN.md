@@ -16,16 +16,25 @@
 
 ## 环境与目录约定
 
-路径是每个脚本顶部的常量：
+路径**不是**脚本里的硬编码常量：每个脚本都从 `self-heal.config.mjs` 取，而后者按
+`环境变量 → <harness>\config\self-heal.config.json → 默认值` 的顺序解析。安装器把这份 JSON 写成
+唯一事实来源，所以换一台机器只需重新跑一次安装器（或改这份 JSON），不必改代码。
 
-| 常量 | 本机取值 |
+| 键 / 取值 | 本机示例 |
 | --- | --- |
-| 安装根 / 启动器 | `D:\dsh` |
-| `$DSH_HOME` | `D:\dsh\home` |
-| 配置档 | `$DSH_HOME\profiles\web`、`headless`、`rescue` |
-| 宿主日志 / 闸门日志 | `D:\dsh\dsh-console.log`、`$DSH_HOME\state\gate.log` |
-| 事故包 | `$DSH_HOME\state\incidents\<时间戳>-exit<N>\` |
-| 修复探针端口 | 3081 |
+| 安装根 `harnessRoot`（`--harness`） | `D:\dsh` |
+| `$DSH_HOME`（`home`） | `D:\dsh\home` |
+| 配置档 `profile` | `web` |
+| 宿主日志 `log` / 闸门日志 `state\gate.log` | `D:\dsh\dsh-console.log`、`$DSH_HOME\state\gate.log` |
+| 事故包 `incidents` | `$DSH_HOME\state\incidents\<时间戳>-exit<N>\` |
+| 修复探针端口 `probePort` | 3081 |
+
+可覆盖的环境变量：`DSH_SELFHEAL_HARNESS`（安装根）、`DSH_SELFHEAL_NODE`（node 解释器）。
+其余键用 `DSH_SELFHEAL_<键名大写>` 覆盖，例如 `DSH_SELFHEAL_STATE`、`DSH_SELFHEAL_INCIDENTS`。
+
+> **升级提示**：早于 2026-09-27 的版本把 `state` 与事故目录写在 `<harness>\state\` 下，
+> 而 kit 配置默认指向 `$DSH_HOME\state\`。如果你有旧事故包留在 `<harness>\state\incidents\`，
+> 在 JSON 里显式加一行 `"state"`（或 `"incidents"`）指向它即可；安装器会**保留**这两个键，不会覆盖。
 
 `DSH_HOME` 会显式传给每一个子进程：启动器那条链的环境里没有它，不传的话 CLI 会静默地去组合**另一个安装**的 home。
 
@@ -43,6 +52,20 @@ node self-heal-install.mjs install    # --harness <dir> --home <dir> --launcher 
 就能唤醒闸门、看护与 L1 修复阶梯**（默认 `DSH_SUPERVISOR_REPAIR_AGENT=1`，`DSH_NO_REPAIR_AGENT=1` 可关）、
 创建出厂兜底 profile，最后跑一次闸门作为交付验证。如果你的启动器不像 DSH 启动器，它**不会擅自修改**，
 而是生成 `start-dsh-self-heal.cmd` 包装脚本。`uninstall` 用于摘掉接线块。
+
+安装器是**幂等且会自我收敛**的：重复运行同一行字节不变；即使启动器被手改乱了
+（例如接线块重复了若干份），它也会先把重复折叠成一份再退出。
+`install` 只刷新它自己拥有的配置键，**你手工加进 JSON 的键会被保留并打印出来**，不会被覆盖。
+
+改完启动器后建议直接验证一次（只读、不启动宿主）：
+
+```powershell
+$env:DSH_NO_PAUSE=1; cmd /c "D:\dsh\start-dsh.cmd -GateOnly"
+```
+
+顺带两个已修的坑：安装器此前用 `import.meta.url` 的 `.pathname` 取自身目录，
+路径里只要有空格就会变成 `%20`，导致复制套件时 `ENOENT` 中断（**安装半途而废：配置已写、脚本没复制**）；
+接线时查找 `start-dsh.ps1` 用的正则也会命中**注释行**，于是每跑一次就往文件里多插一个接线块。
 
 方式 B——手工接线：
 
@@ -90,11 +113,18 @@ repair/repair-prompt.md         修复契约：允许清单、报告路径、停
 repair/HOST-DOWN-README.md      人工排障说明
 repair/plumbing-test-prompt.md  管道自检用的无害提示词
 self-heal.config.mjs            统一路径解析（env → 配置文件 → 默认值）
-self-heal-install.mjs           选项 A 安装器：配置、复制、接线、兜底档、交付验证
+self-heal-install.mjs           选项 A 安装器：配置、复制（含 repair\）、接线、兜底档、交付验证
 launcher-integration.md         启动器要加的接线
 ```
 
-事故目录里会有 `summary.md`、`console-tail.txt`、`gate.txt`、`dump-config.txt`、`ladder.md`、`boot-probe.log`、`repair-live-<n>.log`，以及产出过报告时的 `repair-report.md`。
+`repair\HOST-DOWN-README.md` 里用 `{{HARNESS}}` `{{HOME}}` `{{INCIDENTS}}` `{{CLI}}` 这类占位符代替写死的路径，
+由 `write-host-down-readme.mjs` 在写盘时按当前配置替换（未知占位符会原样保留并告警）。
+这样同一份源文件在任何安装布局下给出的都是**正确**路径——之前写死的版本在 state 根目录变更后会指错地方。
+
+事故目录里会有 `summary.md`、`console-tail.txt`、`gate.txt`、`dump-config.txt`，以及产出过的 `ladder.md`、
+`boot-probe.log`、`repair-live-<n>.log`、`repair-report.md`。**它们不是每次都齐**：`gate.txt`/`console-tail.txt`/`dump-config.txt`
+基本总在，而 `ladder.md` 只有跑过阶梯的事故才有，`repair-report.md` 更是常常没有（修复会话的工作区是 `$DSH_HOME`，
+报告通常写在 `$DSH_HOME\repair-<事故>\` 下，看护会尝试回拷一份）。所以**别用"文件齐备"当判据**。
 
 ## 许可证
 

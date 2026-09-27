@@ -21,6 +21,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 const argv = process.argv.slice(2)
 const command = argv[0] ?? 'check'
@@ -33,7 +34,14 @@ const HOME = opt('--home', process.env.DSH_HOME ?? `${HARNESS}\\home`)
 const NODE = opt('--node', `${HARNESS}\\runtime\\node\\node.exe`)
 const LAUNCHER = opt('--launcher', `${HARNESS}\\start-dsh.cmd`)
 const CONFIG = `${HARNESS}\\config\\self-heal.config.json`
-const SRC = new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, '$1').replace(/\//gu, '\\')
+// The kit's own directory, derived from this module's URL.
+// WHY fileURLToPath AND NOT `.pathname`: `pathname` is PERCENT-ENCODED and keeps a leading
+// slash, so a kit checked out under a path containing a space produced
+// `D:\deepseek%20harness\self-heal-kit` and every copyFileSync below died with
+// ENOENT ... 'D:\deepseek%20harness\self-heal-kit\start-gate.mjs'. fileURLToPath decodes the
+// percent-escapes and yields a native path. Measured 2026-09-27: the untouched installer
+// failed exactly this way from D:\deepseek harness\self-heal-kit.
+const SRC = fileURLToPath(new URL('.', import.meta.url)).replace(/[\\/]+$/u, '')
 const dryRun = argv.includes('--dry-run')
 const BEGIN = 'REM === dsh-self-heal BEGIN ==='
 const END = 'REM === dsh-self-heal END ==='
@@ -41,6 +49,14 @@ const END = 'REM === dsh-self-heal END ==='
 const say = (s) => console.log(s)
 const toCRLF = (text) => text.replace(/\r?\n/gu, '\r\n')
 const lfOnly = (text) => (text.match(/(?<!\r)\n/gu) ?? []).length
+
+/**
+ * Record a delivery failure. A missing piece of the kit used to be reported only as a log line
+ * while the installer still exited 0 and printed "完成" — a success report for an install that
+ * cannot work. Failures now decide the exit code.
+ */
+const problems = []
+const fail = (msg) => { problems.push(msg); say(`[FAIL] ${msg}`) }
 
 function block(indent = '') {
   return [
@@ -81,21 +97,66 @@ function readLauncher() {
 function wireLauncher() {
   const original = readLauncher()
   if (original === undefined) { say(`[wire] 找不到启动器 ${LAUNCHER} → 改用包装脚本`); return writeWrapper() }
-  const alreadyWired = original.includes(BEGIN) && original.includes(SUPERVISOR_CALL)
-  if (alreadyWired) { say('[wire] 启动器已接线（幂等，不改动）'); return true }
   if (!/(start-dsh\.ps1|dsh\\lib\\bin\.js)/u.test(original)) {
     say('[wire] 启动器不像 DSH 启动器 → 不擅自修改，改用包装脚本')
     return writeWrapper()
   }
-  copyFileSync(LAUNCHER, `${LAUNCHER}.bak-selfheal-${new Date().toISOString().replace(/[-:T]/gu, '').slice(0, 14)}`)
   const lines = original.split(/\r?\n/u)
-  const launchAt = lines.findIndex((l) => /start-dsh\.ps1/u.test(l))
+  const isComment = (l) => /^\s*(REM\b|::)/iu.test(l)
+  // Every line this installer injects into the launch tail, whoever wrote it.
+  // WHY SO NARROW: two earlier, looser predicates each broke idempotency in a different way.
+  // Matching only our canonical string missed a hand-written `%~dp0config\host-supervisor.mjs`
+  // call; matching `--exit-code` alone missed the 3 companion lines (a "keep the window" REM and
+  // two DSH_NO_PAUSE lines) so each run ADDED three without removing any; matching any
+  // DSH_NO_PAUSE line also caught the launcher's OWN `:gate_refused` pause, so each run REMOVED
+  // a user line too — the file oscillated 135 <-> 158 lines with period 2 (the build never
+  // converged, which also means "all checks passed" would only ever have covered one phase).
+  // So: match the launch tail op by op, each tied to something only this installer writes.
+  const isSupervisorCall = (l) => {
+    if (isComment(l)) return /窗口留住/u.test(l)
+    if (/host-supervisor\.mjs/u.test(l) && /--exit-code/u.test(l)) return true
+    return /%CODE%/u.test(l) && /DSH_NO_PAUSE/u.test(l) && /(pause|echo)/u.test(l)
+  }
+
+  // Inject at the line that actually INVOKES start-dsh.ps1.
+  // WHY NOT `lines.findIndex((l) => /start-dsh\.ps1/.test(l))`: that also matches prose. The
+  // real launcher carries `REM  start-dsh.ps1 next to this file).` near the top, so the first
+  // "match" was a COMMENT and every install inserted another block there.
+  // Measured 2026-09-27: three runs took the launcher 135 -> 159 -> 183 -> 207 lines, with 3
+  // BEGIN blocks and 4 `chcp` lines. A deploy script must stay idempotent even against a
+  // hand-edited launcher, so: skip comments, collapse, and rebuild rather than append.
+
+  // Collapse: drop every existing marked block, then every supervisor call. What remains is the
+  // user's own launcher; exactly one block and one supervisor call are re-injected below.
+  const collapsed = []
+  let insideBlock = false
+  for (const line of lines) {
+    if (line.trim() === BEGIN) { insideBlock = true; continue }
+    if (line.trim() === END) { insideBlock = false; continue }
+    if (insideBlock) continue
+    if (isSupervisorCall(line)) continue
+    collapsed.push(line)
+  }
+  // Idempotency is judged by the SHAPE of the file, not by "did the collapse remove anything".
+  // Those are not the same question: a correctly wired launcher ALWAYS has its block and its
+  // supervisor call inside the collapse set, so `collapsed.length === lines.length` can never
+  // hold and the guard could never fire — the installer rewrote an already-correct launcher on
+  // every run (measured 2026-09-27). Count the parts instead: exactly one marked block, exactly
+  // one supervisor call, exactly one keep-the-window group. If that holds, the collapsed form
+  // is byte-stable and there is nothing to do.
+  const countOf = (re) => (original.match(re) ?? []).length
+  const isCleanShape = countOf(/dsh-self-heal BEGIN/gu) === 1
+    && countOf(/dsh-self-heal END/gu) === 1
+    && countOf(/^.*host-supervisor\.mjs.*--exit-code.*$/gmu) === 1
+    && countOf(/窗口留住/gu) === 1
+  if (isCleanShape) { say('[wire] 启动器已接线且无重复（幂等，不改动）'); return true }
+  copyFileSync(LAUNCHER, `${LAUNCHER}.bak-selfheal-${new Date().toISOString().replace(/[-:T]/gu, '').slice(0, 14)}`)
+  const at = collapsed.findIndex((l) => !isComment(l) && /start-dsh\.ps1/u.test(l))
   const out = []
-  for (let i = 0; i < lines.length; i += 1) {
-    if (i === launchAt) out.push(block())
-    if (lines[i].includes(SUPERVISOR_CALL)) continue
-    out.push(lines[i])
-    if (i === launchAt + 1 && /^set "CODE=/u.test(lines[i].trim())) {
+  for (let i = 0; i < collapsed.length; i += 1) {
+    if (i === at && at >= 0) out.push(block())
+    out.push(collapsed[i])
+    if (at >= 0 && i === at + 1 && /^set "CODE=/u.test(collapsed[i].trim())) {
       out.push(SUPERVISOR_CALL)
       out.push('REM  窗口留住，好让 L1 的进度和事故目录被看见（DSH_NO_PAUSE=1 可关）')
       out.push('if not "%CODE%"=="0" if not defined DSH_NO_PAUSE echo.& echo [dsh] 按任意键关闭此窗口 ...')
@@ -103,6 +164,9 @@ function wireLauncher() {
     }
   }
   writeCRLF(LAUNCHER, out.join('\r\n'))
+  const removed = lines.length - collapsed.length
+  if (removed > 0) say(`[wire] 已折叠重复接线（去掉 ${removed} 行；${lines.length} → ${out.length} 行，BEGIN 块与 supervisor 调用各只保留 1 份）`)
+  else say(`[wire] 已接线（${lines.length} → ${out.length} 行）`)
   return true
 }
 
@@ -139,21 +203,64 @@ function writeConfig() {
     launcher: LAUNCHER,
   }
   if (dryRun) { say('[dry-run] 将写 ' + CONFIG); return }
+  // MERGE, do not clobber. This file is explicitly documented as the one place a deployment
+  // records where things live, and self-heal.config.mjs reads keys beyond this list (state,
+  // attempts, gate, supervisor, ladder, guide, fixed, and the timeouts). Replacing the whole
+  // file silently deleted any such key on every re-install — measured 2026-09-27: a `state`
+  // key added by hand was gone after one install run, with no warning. Keys this function owns
+  // are refreshed; everything else the deployment set is preserved and reported.
+  let previous = {}
+  if (existsSync(CONFIG)) {
+    try { previous = JSON.parse(readFileSync(CONFIG, 'utf8')) } catch { previous = {} }
+  }
+  if (typeof previous !== 'object' || previous === null || Array.isArray(previous)) previous = {}
+  const preserved = Object.keys(previous).filter((k) => !Object.hasOwn(config, k))
+  const merged = { ...previous, ...config }
   mkdirSync(`${HARNESS}\\config`, { recursive: true })
-  writeFileSync(CONFIG, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
+  writeFileSync(CONFIG, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
   say(`[config] 已写 ${CONFIG}（脚本从这里取路径，不再硬编码）`)
+  if (preserved.length > 0) say(`[config] 保留了你自定义的键：${preserved.join(', ')}`)
 }
 
 function copyKit() {
   // EXPLICIT list. A wildcard here would ship every unrelated .mjs that happens to sit in the
-  // same directory (85 files in this checkout) — the kit is exactly these five.
+  // same directory (85 files in this checkout) — the kit is exactly these six.
   const files = ['start-gate.mjs', 'host-supervisor.mjs', 'incident-repair.mjs', 'write-host-down-readme.mjs', 'self-heal.config.mjs', 'self-heal-install.mjs']
+  // The repair/ directory is NOT optional, even though nothing imports it: writeConfig points
+  // `promptFile` and `overlay` at these files, and incident-repair.mjs hard-exits (code 2) when
+  // either is missing. This function copied only the .mjs files, so a fresh install produced a
+  // config naming two files that were never placed — the repair ladder could not start at all.
+  // The second .mjs list is the kit's own manifest; keep the two in step.
+  const repairFiles = ['repair-prompt.md', 'repair-overlay.yml', 'HOST-DOWN-README.md', 'plumbing-test-prompt.md']
+  const sameDir = SRC.toLowerCase() === `${HARNESS}\\config`.toLowerCase()
+  let copied = 0
   for (const f of files) {
-    if (SRC.toLowerCase() === `${HARNESS}\\config`.toLowerCase()) { say(`[copy] 已在目标目录：${f}`); continue }
+    if (sameDir) { say(`[copy] 已在目标目录：${f}`); continue }
     if (dryRun) { say(`[dry-run] 将复制 ${f}`); continue }
     copyFileSync(`${SRC}\\${f}`, `${HARNESS}\\config\\${f}`)
+    copied += 1
   }
-  say(`[copy] 套件文件 ${files.length} 个`)
+  const repairDest = `${HARNESS}\\config\\repair`
+  if (!sameDir) {
+    if (dryRun) say(`[dry-run] 将复制 repair\\ 下 ${repairFiles.length} 个文件`)
+    else {
+      mkdirSync(repairDest, { recursive: true })
+      for (const f of repairFiles) {
+        if (!existsSync(`${SRC}\\repair\\${f}`)) { say(`[copy] 警告：套件里缺少 repair\\${f}`); continue }
+        copyFileSync(`${SRC}\\repair\\${f}`, `${repairDest}\\${f}`)
+        copied += 1
+      }
+    }
+  } else {
+    say('[copy] 已在目标目录（config\\repair 就地生效）')
+  }
+  const total = files.length + repairFiles.length
+  say(`[copy] 套件文件 ${copied}/${total} 个${dryRun ? '（dry-run）' : ''}`)
+  // Prove the two paths the config just declared actually exist. Without this the install can
+  // "succeed" while the ladder is dead on arrival.
+  for (const [label, path] of [['repair-prompt.md', `${repairDest}\\repair-prompt.md`], ['repair-overlay.yml', `${repairDest}\\repair-overlay.yml`]]) {
+    if (!existsSync(path)) fail(`缺少 ${label}：${path}（L1 修复阶梯将无法启动）`)
+  }
 }
 
 function rescueProfile() {
@@ -192,6 +299,9 @@ function check() {
   for (const f of ['start-gate.mjs', 'host-supervisor.mjs', 'incident-repair.mjs', 'write-host-down-readme.mjs', 'self-heal.config.mjs']) {
     say(`套件文件  ${f} ${existsSync(`${HARNESS}\\config\\${f}`) ? '有' : '缺'}`)
   }
+  for (const f of ['repair-prompt.md', 'repair-overlay.yml', 'HOST-DOWN-README.md']) {
+    say(`修复契约  ${f} ${existsSync(`${HARNESS}\\config\\repair\\${f}`) ? '有' : '缺'}`)
+  }
   say(`出厂档    ${existsSync(`${HOME}\\profiles\\rescue`) ? '有' : '缺'}`)
 }
 
@@ -206,6 +316,12 @@ function uninstall() {
   say('[uninstall] 套件文件保留（--keep-files 之外的删除属于不可逆操作，由你手动做）')
 }
 
-if (command === 'install') { writeConfig(); copyKit(); wireLauncher(); rescueProfile(); verifyGate(); say('\n完成。启动方式：双击 ' + (existsSync(`${HARNESS}\\start-dsh-self-heal.cmd`) ? 'start-dsh-self-heal.cmd' : LAUNCHER.split('\\').pop())) }
-else if (command === 'uninstall') uninstall()
+if (command === 'install') {
+  writeConfig(); copyKit(); wireLauncher(); rescueProfile(); verifyGate()
+  if (problems.length > 0) {
+    say(`\n安装未完成：${problems.length} 项失败。修好上面 [FAIL] 的项后重跑；不要以为已经装好了。`)
+    process.exit(1)
+  }
+  say('\n完成。启动方式：双击 ' + (existsSync(`${HARNESS}\\start-dsh-self-heal.cmd`) ? 'start-dsh-self-heal.cmd' : LAUNCHER.split('\\').pop()))
+} else if (command === 'uninstall') uninstall()
 else check()

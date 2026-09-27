@@ -27,17 +27,27 @@
 import * as CFG from './self-heal.config.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 const NODE = CFG.NODE
 const BIN = CFG.BIN
 const HOME = CFG.HOME
-const PROFILE = `${HOME}\\profiles\\web`
+const PROFILE = `${HOME}\\profiles\\${CFG.PROFILE}`
 const HOME_PATCH = CFG.HOME_PATCH
 const LOG = CFG.LOG
 const STATE = CFG.STATE
 const INCIDENTS = CFG.INCIDENTS
 const ATTEMPTS = CFG.ATTEMPTS
-const GATE = 'D:\\dsh\\config\\start-gate.mjs'
+// All of these come from the kit config (self-heal.config.mjs) instead of literals: the
+// installer copies this file into HARNESS\config and resolves every path from
+// self-heal.config.json, so a hardcoded D:\dsh\... would make the supervisor watch the wrong
+// tree, write its log to the wrong place, and invoke the wrong gate/ladder on any install
+// that was pointed elsewhere with --harness.
+const GATE = CFG.GATE
+const LADDER = CFG.LADDER
+const FIXED = CFG.FIXED
+const LAUNCHER = CFG.LAUNCHER
+const SUPERVISOR_LOG = join(STATE, 'supervisor.log')
 
 const COOLDOWN_MS = CFG.COOLDOWN_MS
 const MAX_ATTEMPTS = CFG.MAX_ATTEMPTS
@@ -74,7 +84,7 @@ function run(file, args, options = {}) {
  *  at all. Detached means the work and its evidence survive the window; the tail keeps the
  *  progress visible while the window is open. */
 function runStream(file, args, options = {}) {
-  const logPath = options.logPath ?? 'D:\\dsh\\state\\ladder-live.log'
+  const logPath = options.logPath ?? join(STATE, 'ladder-live.log')
   writeFileSync(logPath, '(detached; output mirrored here)\n', 'utf8')
   const fd = openSync(logPath, 'a')
   const child = spawn(file, args, { detached: true, stdio: ['ignore', fd, fd], env: { ...process.env, DSH_HOME: HOME } })
@@ -134,12 +144,18 @@ const gatePassed = gate.ok || /未发现确证不一致/u.test(gate.out)
  *  NOTE: `execFileSync('...\\pnpm.cmd', ...)` FAILS on modern Node (EINVAL: spawning a
  *  .cmd without a shell is blocked since the 2024 batch-file advisory). The first
  *  version of this supervisor did exactly that and reported "pnpm install (failed)"
- *  while the same command run by hand succeeded. Prefer the JS entry; fall back to
- *  cmd.exe /c for the shim. */
-const PNPM_CJS = 'D:\\dsh\\runtime\\node\\node_modules\\pnpm\\bin\\pnpm.cjs'
-const PNPM_CMD = 'D:\\dsh\\runtime\\node\\pnpm.cmd'
+ *  while the same command run by hand succeeded. So: run the native binary directly when
+ *  it exists, and only fall back to `cmd.exe /c` for the .cmd shim.
+ *
+ *  pnpm is located RELATIVE TO THE CONFIGURED NODE, never by literal path. Two things were
+ *  wrong with the previous literals: they pointed at a D:\dsh install regardless of
+ *  --harness, and the `.cjs` entry they preferred does not exist on this machine at all —
+ *  this pnpm ships as a native binary (`"bin": {"pnpm": "pnpm.exe"}`), so that branch had
+ *  silently become dead code. */
+const PNPM_EXE = join(dirname(NODE), 'node_modules', 'pnpm', 'pnpm.exe')
+const PNPM_CMD = join(dirname(NODE), 'pnpm.cmd')
 function runPnpmInstall() {
-  if (existsSync(PNPM_CJS)) return { ...run(NODE, [PNPM_CJS, 'install'], { cwd: PROFILE }), how: `node ${PNPM_CJS}` }
+  if (existsSync(PNPM_EXE)) return { ...run(PNPM_EXE, ['install'], { cwd: PROFILE }), how: PNPM_EXE }
   return { ...run('cmd.exe', ['/c', PNPM_CMD, 'install'], { cwd: PROFILE }), how: `cmd /c ${PNPM_CMD}` }
 }
 
@@ -190,7 +206,7 @@ if (wantRepair && hasDrift) {
   // Off by default because it spends API tokens and lets a model edit config files
   // unattended (bounded by repair-overlay.yml: workspace-write@$DSH_HOME + never).
   if (process.env.DSH_SUPERVISOR_REPAIR_AGENT === '1') {
-    const r = await runStream(NODE, ['D:\\dsh\\config\\incident-repair.mjs', '--ladder', '--incident', dir, '--timeout-mins', '10'], { logPath: `${dir}\\ladder-live.log` })
+    const r = await runStream(NODE, [LADDER, '--ladder', '--incident', dir, '--timeout-mins', '10'], { logPath: `${dir}\\ladder-live.log` })
     // The ladder's EXIT CODE is the verdict (0 = its boot probe came back ALIVE). Keying off
     // "repair-report.md exists in the incident directory" was wrong twice over: the repair
     // session cannot write there (it works inside $DSH_HOME), and the 19:04 run therefore
@@ -210,7 +226,7 @@ if (wantRepair && hasDrift) {
       try { copyFileSync(found, `${dir}\\repair-report.md`) } catch { /* keep going */ }
     }
     actions.push(`L1/L1.5 修复阶梯：${repaired ? 'REPAIRED（启动探针通过）' : `未修好（exit=${r.code}）`}；报告：${found ?? '未找到（只记警告）'}`)
-    if (!repaired) actions.push('三级都没救回来 → 通用说明已放到 D:\\dsh\\HOST-DOWN-README.md（由固定脚本写入）')
+    if (!repaired) actions.push(`三级都没救回来 → 通用说明已放到 ${FIXED}（由固定脚本写入）`)
   } else {
     actions.push('L1 未启用（设 DSH_SUPERVISOR_REPAIR_AGENT=1 可让有界修复会话接手）')
   }
@@ -252,7 +268,7 @@ writeFileSync(`${dir}\\summary.md`, summary, 'utf8')
 const relaunch = process.env.DSH_SUPERVISOR_RELAUNCH === '1' && wantRepair && hasDrift && recent.length < MAX_ATTEMPTS
 if (relaunch) {
   recordAttempt('relaunch')
-  run('cmd.exe', ['/c', 'start', '', 'D:\\dsh\\start-dsh.cmd'])
+  run('cmd.exe', ['/c', 'start', '', LAUNCHER])
   actions.push('已请求一次重启（DSH_SUPERVISOR_RELAUNCH=1）')
 } else if (process.env.DSH_SUPERVISOR_RELAUNCH === '1') {
   actions.push('未重启（修复未发生或已达上限）')
@@ -263,14 +279,14 @@ if (relaunch) {
 const supLine = `[supervisor] incident=${dir} classes=${classes.join('|')} actions=${actions.length}`
 try {
   mkdirSync(STATE, { recursive: true })
-  appendFileSync('D:\\dsh\\state\\supervisor.log', `${supLine} ${new Date().toISOString()}\n`, 'utf8')
+  appendFileSync(SUPERVISOR_LOG, `${supLine} ${new Date().toISOString()}\n`, 'utf8')
 } catch (error) {
   say(`[supervisor] 无法写入 supervisor.log：${String(error.message).slice(0, 100)}`)
 }
 try {
   appendFileSync(LOG, `${supLine}\n`, 'utf8')
 } catch (error) {
-  say(`[supervisor] 判定未能写入 dsh-console.log（${String(error.code ?? error.message).slice(0, 40)}）—— 已记入 D:\\dsh\\state\\supervisor.log`)
+  say(`[supervisor] 判定未能写入 dsh-console.log（${String(error.code ?? error.message).slice(0, 40)}）—— 已记入 ${SUPERVISOR_LOG}`)
 }
 
 say(`[supervisor] 事故目录：${dir}`)
@@ -284,7 +300,7 @@ say('    console-tail.txt   崩溃原文（日志最后 200 行）')
 say('    gate.txt           闸门结论（该故障是否在它的覆盖范围内）')
 say(`    ladder.md          L1 / L1.5 分级结果${existsSync(`${dir}\\ladder.md`) ? '' : '（本次未启用 L1）'}`)
 say(`    repair-report.md   修复会话的报告${existsSync(`${dir}\\repair-report.md`) ? '' : '（未生成 → 视为 NEEDS-HUMAN）'}`)
-if (existsSync('D:\\dsh\\HOST-DOWN-README.md')) say('  D:\\dsh\\HOST-DOWN-README.md   三级全败时写下的通用说明')
+if (existsSync(FIXED)) say(`  ${FIXED}   三级全败时写下的通用说明`)
 say('==============================================================')
 say('[supervisor] 详见 summary.md')
 process.exit(0)

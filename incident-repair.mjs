@@ -52,6 +52,12 @@ const promptFile = opt('--prompt', PROMPT_FILE)
 const timeoutMins = Number(opt('--timeout-mins', '10'))
 
 const newestIncident = () => {
+  // Guarded: this used to let readdirSync throw ENOENT when the incidents root did not exist
+  // yet, so instead of the documented "no incident directory" message (exit 2) the operator got
+  // a raw fs stack trace — on a fresh install, which is exactly when a human is most likely to
+  // be running this by hand. Verified 2026-09-27 by pointing DSH_SELFHEAL_INCIDENTS at a
+  // non-existent directory: exit 1 + stack trace.
+  if (!existsSync(INCIDENTS)) return undefined
   const dirs = readdirSync(INCIDENTS, { withFileTypes: true })
     .filter((e) => e.isDirectory())
     .map((e) => ({ name: e.name, at: statSync(`${INCIDENTS}\\${e.name}`).mtimeMs }))
@@ -230,5 +236,5 @@ console.log(`\n[repair] 阶梯：${rungs.map((r) => `${r.label}=${r.verdict}`).j
 console.log(`[repair] 修复报告：${existsSync(reportPath) ? reportPath : '未生成（视为 NEEDS-HUMAN）'}`)
 console.log(`[repair] 分级判定：${incident}\\ladder.md`)
 if (sessions !== undefined) console.log(`[repair] 完整修复会话记录：${sessions}（session.v3.jsonl.zstd）`)
-if (guideWritten) console.log('[repair] 通用说明：D:\\dsh\\HOST-DOWN-README.md')
+if (guideWritten) console.log(`[repair] 通用说明：${CFG.FIXED}`)
 process.exit(repaired ? 0 : 3)

@@ -29,8 +29,12 @@ import { pathToFileURL } from 'node:url'
 
 const NODE = CFG.NODE
 const BIN = CFG.BIN
-const DSH_HOME = 'D:\\dsh\\home'
-const PROFILE = `${DSH_HOME}\\profiles\\web`
+// Resolved through the kit config rather than hardcoded: this file is copied verbatim into
+// HARNESS\config by the installer, and the installer's own message promises "脚本从这里取路径，
+// 不再硬编码". A literal D:\dsh\... here would silently check the WRONG home/profile on any
+// installation that used --harness, and the gate would then pass or fail against the wrong tree.
+const DSH_HOME = CFG.HOME
+const PROFILE = `${DSH_HOME}\\profiles\\${CFG.PROFILE}`
 const HOME_PATCH = CFG.HOME_PATCH
 const LOG = CFG.LOG
 const STATE = CFG.STATE
