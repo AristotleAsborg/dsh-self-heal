@@ -25,7 +25,7 @@
  * Exit:  always 0 (the launcher owns the exit code).
  */
 import { execFileSync, spawn } from 'node:child_process'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 
 const NODE = 'D:\\dsh\\runtime\\node\\node.exe'
 const BIN = 'D:\\dsh\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
@@ -190,9 +190,26 @@ if (wantRepair && hasDrift) {
   // unattended (bounded by repair-overlay.yml: workspace-write@$DSH_HOME + never).
   if (process.env.DSH_SUPERVISOR_REPAIR_AGENT === '1') {
     const r = await runStream(NODE, ['D:\\dsh\\config\\incident-repair.mjs', '--ladder', '--incident', dir, '--timeout-mins', '10'], { logPath: `${dir}\\ladder-live.log` })
-    const report = existsSync(`${dir}\\repair-report.md`)
-    actions.push(`L1/L1.5 修复阶梯已调用（${r.ok ? 'ok' : `failed(exit=${r.code})`}）；报告：${report ? '已生成' : '未生成'}`)
-    if (!report) actions.push('三级都没救回来 → 通用说明已放到 D:\\dsh\\HOST-DOWN-README.md（由固定脚本写入）')
+    // The ladder's EXIT CODE is the verdict (0 = its boot probe came back ALIVE). Keying off
+    // "repair-report.md exists in the incident directory" was wrong twice over: the repair
+    // session cannot write there (it works inside $DSH_HOME), and the 19:04 run therefore
+    // reported "三级都没救回来" while the host had in fact been repaired.
+    const repaired = r.ok
+    const incidentName = dir.split('\\').pop()
+    const candidates = [`${dir}\\repair-report.md`, `${HOME}\\repair-${incidentName}.md`]
+    try {
+      for (const entry of readdirSync(HOME)) {
+        if (!entry.includes(incidentName)) continue
+        const path = `${HOME}\\${entry}`
+        candidates.push(statSync(path).isDirectory() ? `${path}\\repair-report.md` : path)
+      }
+    } catch { /* $DSH_HOME always exists in practice */ }
+    const found = candidates.find((p) => existsSync(p))
+    if (found !== undefined && found !== `${dir}\\repair-report.md`) {
+      try { copyFileSync(found, `${dir}\\repair-report.md`) } catch { /* keep going */ }
+    }
+    actions.push(`L1/L1.5 修复阶梯：${repaired ? 'REPAIRED（启动探针通过）' : `未修好（exit=${r.code}）`}；报告：${found ?? '未找到（只记警告）'}`)
+    if (!repaired) actions.push('三级都没救回来 → 通用说明已放到 D:\\dsh\\HOST-DOWN-README.md（由固定脚本写入）')
   } else {
     actions.push('L1 未启用（设 DSH_SUPERVISOR_REPAIR_AGENT=1 可让有界修复会话接手）')
   }

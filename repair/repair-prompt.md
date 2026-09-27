@@ -20,8 +20,8 @@
   `profiles/*/package.json` 的 `dsh.profile.bundles` / `dependencies`。
 - **A2** 从 `$DSH_HOME` 内最近的备份恢复一个文件（`*.bak-*`，按时间取最新，**先说明你要恢复哪一个**）。
 - **A3** 在 `$DSH_HOME\profiles\<profile>` 里跑 `pnpm install`（只重建本地包链接，不改源码）。
-- **A4** 跑只读校验：`node D:\dsh\config\start-gate.mjs`、`node <dsh bin> --profile web --patch D:\dsh\home\cordis.patch.yml --dump-config`。
-- **A5** 在事故目录里写文件（你的报告写这里）。
+- **A4** 只读校验，**不要起子进程**（沙箱会拒绝：`spawnSync … EPERM`，已实测两次）：改为文本级比对 —— 改前/改后逐行 diff，并与事故目录里的 `dump-config.txt` 对照受影响的那一行块，说明你凭什么相信组合可以启动。
+- **A5** 写报告到 `$DSH_HOME\repair-<事故目录名>.md`。**事故目录在你的工作区之外，写不进去（已实测被拒），不要反复尝试**；看护会去 `$DSH_HOME` 取回这份报告。
 
 ## 禁止（做了就是越界；沙箱也会拒绝 $DSH_HOME 之外的写）
 
@@ -33,9 +33,9 @@
 ## 必须遵守的过程
 
 1. **先读证据再动手**：从 `console-tail.txt` 里抄出报错原文（逐字），再给结论。
-2. **一次只改一件事**，改完立刻跑 A4 的两条校验，并把输出写进报告。
+2. **一次只改一件事**，改完立刻按 A4 做一次文本级校验，并把输出写进报告。
 3. 每个改动都要有**回滚命令**（改文件前先复制成 `*.bak-<你的标记>-<时间戳>`）。
-4. 写报告 `repair-report.md`（事故目录内），包含：
+4. 写报告 `$DSH_HOME\repair-<事故目录名>.md`，包含：
    - 诊断（引用原文）
    - 你改了什么、为什么、证据（校验前后输出）
    - 回滚命令（逐条可复制）
