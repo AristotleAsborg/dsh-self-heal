@@ -2,7 +2,7 @@ node_modules/
 *.log
 *.tmp
 
-# local state produced by the kit at runtime
-state/
-incidents/
-HOST-DOWN-README.md
+# runtime state produced by the kit (paths are relative to the harness root)
+/state/
+/incidents/
+/HOST-DOWN-README.md

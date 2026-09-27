@@ -1,0 +1,3 @@
+# The kit is consumed by cmd.exe, node and a YAML loader; keep LF in the repository.
+* text=auto eol=lf
+*.cmd text eol=lf
