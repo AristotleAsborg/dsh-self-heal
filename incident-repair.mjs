@@ -85,10 +85,22 @@ function runRung({ label, profile, forcedFail }) {
     process.exit(2)
   }
   console.log(`[repair] ${label}：${printable}`)
+  console.log(`[repair] ${label}：DSH_HOME=${HOME}（显式传递；不传 CLI 会回落到默认 home）`)
   if (forcedFail === true) return { ok: false, bootFailure: true, out: '(test-only forced failure)', code: 'forced' }
   if (dryRun) return { ok: true, bootFailure: false, out: '(dry-run)', code: 'dry-run' }
   try {
-    const out = execFileSync(NODE, dshArgs, { cwd: HOME, encoding: 'utf8', timeout: timeoutMins * 60 * 1000, maxBuffer: 64 * 1024 * 1024 })
+    // DSH_HOME must be handed over explicitly. The supervisor is started by the launcher, whose
+    // environment carries no DSH_HOME, so the CLI fell back to the DEFAULT home
+    // (C:\Users\ASUS\.dsh): the ladder loaded ANOTHER installation's headless profile
+    // ("profile rescue does not exist" + a permission-preset refusal) while the sandbox write
+    // boundary still pointed at D:\dsh\home. Measured in the 2026-09-27 live-fire test.
+    const out = execFileSync(NODE, dshArgs, {
+      cwd: HOME,
+      env: { ...process.env, DSH_HOME: HOME },
+      encoding: 'utf8',
+      timeout: timeoutMins * 60 * 1000,
+      maxBuffer: 64 * 1024 * 1024,
+    })
     return { ok: true, bootFailure: BOOT_FAIL.test(out), out, code: 0 }
   } catch (error) {
     const out = `${error.stdout ?? ''}${error.stderr ?? ''}${String(error.message)}`

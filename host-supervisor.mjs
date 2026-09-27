@@ -24,7 +24,7 @@
  * Usage: node host-supervisor.mjs --exit-code <n> [--repair] [--print] [--no-print]
  * Exit:  always 0 (the launcher owns the exit code).
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 
 const NODE = 'D:\\dsh\\runtime\\node\\node.exe'
@@ -67,6 +67,15 @@ function run(file, args, options = {}) {
   }
 }
 
+/** Run a command with its output INHERITED by this console, so long steps show live progress.
+ *  The launcher window is the only place the operator watches; a buffered call would show
+ *  nothing for the minutes the repair ladder can take. Evidence still lands in the incident
+ *  directory (the ladder writes ladder.md and repair-agent-output-*.txt itself). */
+function runStream(file, args, options = {}) {
+  const result = spawnSync(file, args, { stdio: 'inherit', ...options })
+  return { ok: result.status === 0, code: result.status, out: '(streamed to this console)' }
+}
+
 // ── 1. evidence ───────────────────────────────────────────────────────────
 const tail = (() => {
   try {
@@ -80,15 +89,22 @@ writeFileSync(`${dir}\\console-tail.txt`, tail, 'utf8')
 const gate = run(NODE, [GATE])
 writeFileSync(`${dir}\\gate.txt`, `${gate.out}\n(exit=${gate.ok ? 0 : gate.code})\n`, 'utf8')
 
-const dump = run(NODE, [BIN, '--profile', 'web', '--patch', HOME_PATCH, '--dump-config'])
+// DSH_HOME is passed explicitly: the launcher's environment does not carry it, and without it
+// the CLI silently composes ANOTHER installation's home (found by the 2026-09-27 live-fire test).
+const dump = run(NODE, [BIN, '--profile', 'web', '--patch', HOME_PATCH, '--dump-config'], { env: { ...process.env, DSH_HOME: HOME } })
 writeFileSync(`${dir}\\dump-config.txt`, `${dump.out}\n(exit=${dump.ok ? 0 : dump.code})\n`, 'utf8')
 
 // ── 2. classification ─────────────────────────────────────────────────────
+// Only the LAST launch attempt counts. The first version scanned the whole 200-line tail, so the
+// historical "unknown config key" text from the 16:39 boot crash labelled every later incident
+// "config-code-skew" — the same history-vs-now mistake already fixed inside the gate.
+const lastLaunch = tail.lastIndexOf('LAUNCH ')
+const segment = lastLaunch >= 0 ? tail.slice(lastLaunch) : tail
 const classes = []
-if (/unknown config key/u.test(tail)) classes.push('config-code-skew')
-if (/plugin tree failed to load|failed to apply loader entry/u.test(tail)) classes.push('entry-failure')
-if (/EADDRINUSE|address already in use/u.test(tail)) classes.push('port-in-use')
-if (/EPERM|EACCES|access is denied/u.test(tail)) classes.push('permission')
+if (/unknown config key/u.test(segment)) classes.push('config-code-skew')
+if (/plugin tree failed to load|failed to apply loader entry/u.test(segment)) classes.push('entry-failure')
+if (/EADDRINUSE|address already in use/u.test(segment)) classes.push('port-in-use')
+if (/EPERM|EACCES|access is denied/u.test(segment)) classes.push('permission')
 if (classes.length === 0) classes.push(`unknown (exit=${exitCode})`)
 
 const driftLines = gate.out.split('\n').filter((l) => l.includes('安装副本与源码不一致'))
@@ -143,9 +159,9 @@ if (wantRepair && hasDrift) {
   // Off by default because it spends API tokens and lets a model edit config files
   // unattended (bounded by repair-overlay.yml: workspace-write@$DSH_HOME + never).
   if (process.env.DSH_SUPERVISOR_REPAIR_AGENT === '1') {
-    const r = run(NODE, ['D:\\dsh\\config\\incident-repair.mjs', '--ladder', '--incident', dir, '--timeout-mins', '10'])
+    const r = runStream(NODE, ['D:\\dsh\\config\\incident-repair.mjs', '--ladder', '--incident', dir, '--timeout-mins', '10'])
     const report = existsSync(`${dir}\\repair-report.md`)
-    actions.push(`L1/L1.5 修复阶梯已调用（${r.ok ? 'ok' : 'failed'}）；报告：${report ? '已生成' : '未生成'}`)
+    actions.push(`L1/L1.5 修复阶梯已调用（${r.ok ? 'ok' : `failed(exit=${r.code})`}）；报告：${report ? '已生成' : '未生成'}`)
     if (!report) actions.push('三级都没救回来 → 通用说明已放到 D:\\dsh\\HOST-DOWN-README.md（由固定脚本写入）')
   } else {
     actions.push('L1 未启用（设 DSH_SUPERVISOR_REPAIR_AGENT=1 可让有界修复会话接手）')
@@ -194,12 +210,33 @@ if (relaunch) {
   actions.push('未重启（修复未发生或已达上限）')
 }
 
+// Never swallow this silently: the gate had exactly that bug (an empty catch hid an EBUSY for
+// a whole session). The console log is best-effort; our own log always gets the line.
+const supLine = `[supervisor] incident=${dir} classes=${classes.join('|')} actions=${actions.length}`
 try {
-  appendFileSync(LOG, `[supervisor] incident=${dir} classes=${classes.join('|')} actions=${actions.length}\n`, 'utf8')
-} catch { /* the log is a convenience */ }
+  mkdirSync(STATE, { recursive: true })
+  appendFileSync('D:\\dsh\\state\\supervisor.log', `${supLine} ${new Date().toISOString()}\n`, 'utf8')
+} catch (error) {
+  say(`[supervisor] 无法写入 supervisor.log：${String(error.message).slice(0, 100)}`)
+}
+try {
+  appendFileSync(LOG, `${supLine}\n`, 'utf8')
+} catch (error) {
+  say(`[supervisor] 判定未能写入 dsh-console.log（${String(error.code ?? error.message).slice(0, 40)}）—— 已记入 D:\\dsh\\state\\supervisor.log`)
+}
 
 say(`[supervisor] 事故目录：${dir}`)
 say(`[supervisor] 分类：${classes.join(', ')}；闸门：${gatePassed ? 'PASS' : 'REFUSED'}；漂移：${hasDrift ? '有' : '无'}`)
 for (const a of actions) say(`[supervisor] ${a}`)
+say('')
+say('=================== 事故目录（证据都在这里） ===================')
+say(`  ${dir}`)
+say('    summary.md         分类、已做的动作、日志尾部')
+say('    console-tail.txt   崩溃原文（日志最后 200 行）')
+say('    gate.txt           闸门结论（该故障是否在它的覆盖范围内）')
+say(`    ladder.md          L1 / L1.5 分级结果${existsSync(`${dir}\\ladder.md`) ? '' : '（本次未启用 L1）'}`)
+say(`    repair-report.md   修复会话的报告${existsSync(`${dir}\\repair-report.md`) ? '' : '（未生成 → 视为 NEEDS-HUMAN）'}`)
+if (existsSync('D:\\dsh\\HOST-DOWN-README.md')) say('  D:\\dsh\\HOST-DOWN-README.md   三级全败时写下的通用说明')
+say('==============================================================')
 say('[supervisor] 详见 summary.md')
 process.exit(0)

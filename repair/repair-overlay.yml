@@ -28,6 +28,20 @@
   config:
     policy: never
 
+# WHY THIS ROW EXISTS (found by the 2026-09-27 live-fire test): with sandbox+approval forced
+# to workspace-write/never, dsh-permission-presets could no longer infer a preset and refused
+# to apply at boot — "composed sandbox and approval defaults match no preset; configure
+# defaultPreset explicitly". `--dump-config` cannot see this (it composes without applying),
+# so only a real boot exposes it. A patch row REPLACES the row's whole config, so the preset
+# table this session needs is restated here (shape taken from the plugin's own README).
+- id: permission
+  config:
+    presets:
+      workspace-write:
+        sandbox: workspace-write
+        approval: never
+    defaultPreset: workspace-write
+
 - id: session-telemetry-otel
   config:
     mode: DISABLED
