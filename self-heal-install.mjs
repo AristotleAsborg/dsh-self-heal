@@ -54,6 +54,8 @@ function block(indent = '') {
     'if /i "%~1"=="-GateOnly" set "DSH_GATE_ONLY=1"',
     'if defined DSH_SKIP_GATE goto :dsh_self_heal_launch',
     `if not exist "${HARNESS}\\config\\start-gate.mjs" goto :dsh_self_heal_launch`,
+    'REM  UTF-8 before the gate: cmd starts at the ANSI code page and would mangle the gate output.',
+    'chcp 65001 >nul',
     '"%DSH_NODE%" "' + HARNESS + '\\config\\start-gate.mjs"',
     'if errorlevel 1 goto :dsh_self_heal_refused',
     'if defined DSH_GATE_ONLY ( echo [dsh] startup gate passed; -GateOnly given, so the host was not started. & exit /b 0 )',
