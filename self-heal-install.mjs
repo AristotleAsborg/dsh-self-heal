@@ -72,6 +72,12 @@ function block(indent = '') {
     'REM  L1 repair ladder ON by default; opt out with: set DSH_NO_REPAIR_AGENT=1',
     'set "DSH_SUPERVISOR_REPAIR_AGENT=1"',
     'if defined DSH_NO_REPAIR_AGENT set "DSH_SUPERVISOR_REPAIR_AGENT="',
+    'REM  Relaunch after a VERIFIED repair is ON by default: once the boot probe (or a confirmed',
+    'REM  resync) proves the host can start, leaving it down helps nobody. Bounded to one relaunch per',
+    'REM  cooldown window by the supervisor, so this cannot become a crash loop.',
+    'REM  Opt out with: set DSH_NO_RELAUNCH=1',
+    'set "DSH_SUPERVISOR_RELAUNCH=1"',
+    'if defined DSH_NO_RELAUNCH set "DSH_SUPERVISOR_RELAUNCH="',
     'set "DSH_GATE_ONLY="',
     'if /i "%~1"=="-GateOnly" set "DSH_GATE_ONLY=1"',
     'if defined DSH_SKIP_GATE goto :dsh_self_heal_launch',
@@ -148,14 +154,29 @@ function wireLauncher() {
   // supervisor call inside the collapse set, so `collapsed.length === lines.length` can never
   // hold and the guard could never fire — the installer rewrote an already-correct launcher on
   // every run (measured 2026-09-27). Count the parts instead: exactly one marked block, exactly
-  // one supervisor call, exactly one keep-the-window group. If that holds, the collapsed form
-  // is byte-stable and there is nothing to do.
+  // one supervisor call, exactly one keep-the-window group.
+  //
+  // BUT SHAPE ALONE IS NOT ENOUGH, and that bug was measured too: after `block()` gained the
+  // relaunch defaults, every launcher still passed the shape test, so the guard reported
+  // "idempotent, no change" and the new lines were NEVER INSTALLED. A guard that asks "does a block
+  // exist?" instead of "is the block CURRENT?" freezes the launcher at whatever it had the first
+  // time. So also compare the existing block's CONTENT against the block we would write now, and
+  // rewrite when they differ.
   const countOf = (re) => (original.match(re) ?? []).length
   const isCleanShape = countOf(/dsh-self-heal BEGIN/gu) === 1
     && countOf(/dsh-self-heal END/gu) === 1
     && countOf(/^.*host-supervisor\.mjs.*--exit-code.*$/gmu) === 1
     && countOf(/窗口留住/gu) === 1
-  if (isCleanShape) { say('[wire] 启动器已接线且无重复（幂等，不改动）'); return true }
+  const existingBlock = (() => {
+    const a = lines.findIndex((l) => l.trim() === BEGIN)
+    const b = lines.findIndex((l) => l.trim() === END)
+    if (a < 0 || b < a) return undefined
+    return lines.slice(a + 1, b).map((l) => l.trim()).join('\n')
+  })()
+  const desiredBlock = block().split('\r\n').slice(1, -1).map((l) => l.trim()).join('\n')
+  const blockIsCurrent = existingBlock !== undefined && existingBlock === desiredBlock
+  if (isCleanShape && blockIsCurrent) { say('[wire] 启动器已接线且无重复（幂等，不改动）'); return true }
+  if (isCleanShape && !blockIsCurrent) say('[wire] 接线块内容已过期（缺少新开关）→ 重写该块')
   copyFileSync(LAUNCHER, `${LAUNCHER}.bak-selfheal-${new Date().toISOString().replace(/[-:T]/gu, '').slice(0, 14)}`)
   const at = collapsed.findIndex((l) => !isComment(l) && /start-dsh\.ps1/u.test(l))
   const out = []
@@ -311,7 +332,7 @@ function check() {
   say(`config    ${CONFIG}${existsSync(CONFIG) ? '' : '（未安装）'}`)
   const text = readLauncher()
   if (text !== undefined) {
-    say(`接线块    ${text.includes(BEGIN) ? '有' : '无'}；L1 默认开启 ${/DSH_SUPERVISOR_REPAIR_AGENT=1/u.test(text) ? '有' : '无'}；CRLF=${(text.match(/\r\n/gu) ?? []).length} LF-only=${lfOnly(text)}`)
+    say(`接线块    ${text.includes(BEGIN) ? '有' : '无'}；L1 默认开启 ${/DSH_SUPERVISOR_REPAIR_AGENT=1/u.test(text) ? '有' : '无'}；修复后自动重启默认开启 ${/DSH_SUPERVISOR_RELAUNCH=1/u.test(text) ? '有' : '无'}；CRLF=${(text.match(/\r\n/gu) ?? []).length} LF-only=${lfOnly(text)}`)
   }
   for (const f of ['start-gate.mjs', 'host-supervisor.mjs', 'incident-repair.mjs', 'write-host-down-readme.mjs', 'self-heal.config.mjs']) {
     say(`套件文件  ${f} ${existsSync(`${HARNESS}\\config\\${f}`) ? '有' : '缺'}`)
@@ -326,7 +347,7 @@ function uninstall() {
   const text = readLauncher()
   if (text !== undefined && text.includes(BEGIN)) {
     copyFileSync(LAUNCHER, `${LAUNCHER}.bak-selfheal-uninstall-${Date.now()}`)
-    const kept = text.split(/\r?\n/u).filter((l) => l !== BEGIN && l !== END && !l.includes('DSH_SUPERVISOR_REPAIR_AGENT') && !l.includes('DSH_NO_REPAIR_AGENT') && !l.includes('dsh_self_heal') && !l.includes(SUPERVISOR_CALL) && !l.startsWith('set "DSH_NODE='))
+    const kept = text.split(/\r?\n/u).filter((l) => l !== BEGIN && l !== END && !l.includes('DSH_SUPERVISOR_REPAIR_AGENT') && !l.includes('DSH_NO_REPAIR_AGENT') && !l.includes('DSH_SUPERVISOR_RELAUNCH') && !l.includes('DSH_NO_RELAUNCH') && !l.includes('dsh_self_heal') && !l.includes(SUPERVISOR_CALL) && !l.startsWith('set "DSH_NODE='))
     writeCRLF(LAUNCHER, kept.join('\r\n'))
     say('[uninstall] 启动器接线已移除（原文有备份）')
   } else { say('[uninstall] 启动器里没有接线块') }

@@ -129,6 +129,32 @@ try {
   check('config unchanged', sha(join(HARNESS, 'config', 'self-heal.config.json')) === beforeCfg)
   check('reports itself as already wired', /幂等/u.test(second.out), second.out.split('\n').find((l) => l.includes('[wire]')))
 
+  section('5b. a STALE block is rewritten (shape-alone idempotency froze the launcher)')
+  // REGRESSION GUARD for a measured bug: the idempotency check counted BEGIN/END/supervisor-call
+  // markers, so once `block()` gained new lines every launcher still "passed" and the installer
+  // reported "idempotent, no change" — the new switches were NEVER installed. A guard that asks
+  // "does a block exist?" instead of "is the block current?" freezes the launcher forever.
+  // Fixture: delete one line from inside the block, which keeps the SHAPE valid but makes the
+  // CONTENT stale. The installer must notice and rewrite; a second run must then be a no-op again.
+  const launcherNow = readFileSync(LAUNCHER, 'utf8')
+  const staleLine = launcherNow.split('\r\n').find((l, i, all) => l.includes('DSH_SUPERVISOR_RELAUNCH')
+    && all.slice(0, i).some((p) => p.includes('dsh-self-heal BEGIN')))
+  check('fixture found a line inside the block to remove', typeof staleLine === 'string' && staleLine.length > 0, String(staleLine))
+  const stale = launcherNow.replace(`${staleLine}\r\n`, '')
+  check('fixture still has a valid SHAPE (1 BEGIN / 1 END / 1 supervisor call)',
+    (stale.match(/dsh-self-heal BEGIN/gu) ?? []).length === 1
+    && (stale.match(/dsh-self-heal END/gu) ?? []).length === 1
+    && (stale.match(/^.*host-supervisor\.mjs.*--exit-code.*$/gmu) ?? []).length === 1)
+  writeFileSync(LAUNCHER, stale, 'utf8')
+  const staleRun = run(['install', '--harness', HARNESS, '--home', HOME, '--launcher', LAUNCHER, '--no-verify'])
+  check('stale-block install exits 0', staleRun.code === 0, `exit=${staleRun.code}`)
+  check('installer NOTICED the block was stale', /接线块内容已过期/u.test(staleRun.out), staleRun.out.split('\n').find((l) => l.includes('[wire]')))
+  check('the removed line is back', readFileSync(LAUNCHER, 'utf8').includes(staleLine))
+  const afterStale = sha(LAUNCHER)
+  const staleAgain = run(['install', '--harness', HARNESS, '--home', HOME, '--launcher', LAUNCHER, '--no-verify'])
+  check('re-run after the rewrite is a no-op again', sha(LAUNCHER) === afterStale && /幂等/u.test(staleAgain.out), staleAgain.out.split('\n').find((l) => l.includes('[wire]')))
+  check('relaunch-after-repair is ON by default in the wired block', /set "DSH_SUPERVISOR_RELAUNCH=1"/u.test(readFileSync(LAUNCHER, 'utf8')))
+
   section('6. a mangled launcher is collapsed back to one copy, not duplicated further')
   // Simulate what a human (or the old buggy installer) leaves behind: an extra block and an extra
   // supervisor call. Text is built by hand rather than by a clever replace, so the fixture is

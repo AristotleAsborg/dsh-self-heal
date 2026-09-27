@@ -18,8 +18,11 @@
  *   COOLDOWN_MS. The history lives in D:\dsh\state\repairs\attempts.json. A repair
  *   loop is the classic failure mode of a supervisor, so it is capped, not trusted.
  *
- * Relaunch is OFF by default: set DSH_SUPERVISOR_RELAUNCH=1 to let it relaunch once
- * after a successful repair.
+ * Relaunch after a VERIFIED repair is ON by default, because the alternative was measured to be worse:
+ * the kit repaired the host, reported success, and left it down, so the operator had to restart by hand.
+ * "Verified" means the ladder's boot probe returned ALIVE, or L0's resync was followed by a passing gate.
+ * Bounded to one relaunch per COOLDOWN_MS, so it cannot become a crash loop.
+ * Opt out with DSH_NO_RELAUNCH=1 (or DSH_SUPERVISOR_RELAUNCH=0); force on with DSH_SUPERVISOR_RELAUNCH=1.
  *
  * Usage: node host-supervisor.mjs --exit-code <n> [--repair] [--print] [--no-print]
  * Exit:  always 0 (the launcher owns the exit code).
@@ -188,53 +191,133 @@ function recordAttempt(action) {
   return list
 }
 const recent = attempts().filter((a) => Date.now() - a.at < COOLDOWN_MS)
+
+/**
+ * The L1/L1.5 ladder: hand this incident to a bounded headless repair session.
+ *
+ * Opt-in, and bounded by repair-overlay.yml (workspace-write@$DSH_HOME + approval never) because it
+ * spends API tokens and lets a model edit config files unattended.
+ */
+async function runLadder() {
+  if (process.env.DSH_SUPERVISOR_REPAIR_AGENT !== '1') {
+    actions.push('L1 未启用（设 DSH_SUPERVISOR_REPAIR_AGENT=1 可让有界修复会话接手）')
+    return
+  }
+  const r = await runStream(NODE, [LADDER, '--ladder', '--incident', dir, '--timeout-mins', '10'], { logPath: `${dir}\\ladder-live.log` })
+  // The ladder's EXIT CODE is the verdict (0 = its boot probe came back ALIVE). Keying off
+  // "repair-report.md exists in the incident directory" was wrong twice over: the repair
+  // session cannot write there (it works inside $DSH_HOME), and the 19:04 run therefore
+  // reported "三级都没救回来" while the host had in fact been repaired.
+  const repaired = r.ok
+  l1Repaired = repaired
+  const incidentName = dir.split('\\').pop()
+  // The agent writes its report to $DSH_HOME (A5) because the incident directory is outside its
+  // workspace. Look THERE as well, or a real report is reported as "no report" — which is exactly what
+  // the live 2026-09-27 incident showed in ladder.md (`报告 NEEDS-HUMAN(无报告)`) even though
+  // repair-20260927141251-exit4.md existed. A report that exists but is described as missing is worse
+  // than no report: it tells the operator the repair was unattended when it was not.
+  const candidates = [`${dir}\\repair-report.md`, `${HOME}\\repair-${incidentName}.md`, `${HOME}\\repair-report.md`]
+  try {
+    for (const entry of readdirSync(HOME)) {
+      if (entry.includes(incidentName) && entry.endsWith('.md')) candidates.push(`${HOME}\\${entry}`)
+      if (entry === 'repair-report.md') candidates.push(`${HOME}\\${entry}`)
+    }
+  } catch { /* $DSH_HOME always exists in practice */ }
+  const found = candidates.find((p) => existsSync(p))
+  if (found !== undefined && found !== `${dir}\\repair-report.md`) {
+    try { copyFileSync(found, `${dir}\\repair-report.md`) } catch { /* keep going */ }
+  }
+  actions.push(`L1/L1.5 修复阶梯：${repaired ? 'REPAIRED（启动探针通过）' : `未修好（exit=${r.code}）`}；报告：${found ?? '未找到（只记警告）'}`)
+  if (!repaired) actions.push(`三级都没救回来 → 通用说明已放到 ${FIXED}（由固定脚本写入）`)
+}
+
+// ── L0: the one allow-listed repair, then decide whether anything is still wrong ──────────
+// L0 and L1 CASCADE. They used to be mutually exclusive branches (drift => L0 only, no drift => L1),
+// so the ladder was unreachable the moment drift existed — including the case that needs it most:
+// drift present AND `pnpm install` unable to clear it. Measured 2026-09-27 during a live drill: a
+// fatal syntax error in an installed copy produced `漂移：有`, L0 resynced it, and the ladder never ran.
+let l0Repaired = false
+let l1Repaired = false
 if (wantRepair && hasDrift) {
   if (recent.length >= MAX_ATTEMPTS) {
-    actions.push(`跳过修复：${COOLDOWN_MS / 60000} 分钟内已有 ${recent.length} 次尝试（上限 ${MAX_ATTEMPTS}），避免重启循环`)
+    actions.push(`跳过 L0 修复：${COOLDOWN_MS / 60000} 分钟内已有 ${recent.length} 次尝试（上限 ${MAX_ATTEMPTS}），避免重启循环`)
   } else {
     const pnpm = runPnpmInstall()
     recordAttempt('pnpm-install-resync')
     writeFileSync(`${dir}\\pnpm-repair.txt`, `${pnpm.how}\n${pnpm.out}\n(exit=${pnpm.ok ? 0 : pnpm.code})\n`, 'utf8')
     const gateAfter = run(NODE, [GATE])
+    l0Repaired = pnpm.ok && gateAfter.ok
     const firstError = pnpm.ok ? '' : `｜首行错误：${(pnpm.out.split('\n').find((l) => l.trim() !== '') ?? '').slice(0, 120)}`
-    actions.push(`R1 已执行：pnpm install（${pnpm.ok ? 'ok' : 'failed'}${firstError}）→ 重跑闸门 ${gateAfter.ok ? 'PASS（可重启）' : '仍不一致，需人工'}`)
+    actions.push(`R1 已执行：pnpm install（${pnpm.ok ? 'ok' : 'failed'}${firstError}）→ 重跑闸门 ${gateAfter.ok ? 'PASS（可重启）' : '仍不一致'}`)
     writeFileSync(`${dir}\\gate-after-repair.txt`, `${gateAfter.out}\n(exit=${gateAfter.ok ? 0 : gateAfter.code})\n`, 'utf8')
   }
 } else if (wantRepair && !hasDrift) {
-  actions.push(`无需 L0 修复：闸门${gatePassed ? '已通过' : '未通过'}且未发现副本漂移（该故障不在允许清单内）`)
-  // L1 ladder, OPT-IN: hand this incident to a bounded headless repair session.
-  // Off by default because it spends API tokens and lets a model edit config files
-  // unattended (bounded by repair-overlay.yml: workspace-write@$DSH_HOME + never).
-  if (process.env.DSH_SUPERVISOR_REPAIR_AGENT === '1') {
-    const r = await runStream(NODE, [LADDER, '--ladder', '--incident', dir, '--timeout-mins', '10'], { logPath: `${dir}\\ladder-live.log` })
-    // The ladder's EXIT CODE is the verdict (0 = its boot probe came back ALIVE). Keying off
-    // "repair-report.md exists in the incident directory" was wrong twice over: the repair
-    // session cannot write there (it works inside $DSH_HOME), and the 19:04 run therefore
-    // reported "三级都没救回来" while the host had in fact been repaired.
-    const repaired = r.ok
-    const incidentName = dir.split('\\').pop()
-    const candidates = [`${dir}\\repair-report.md`, `${HOME}\\repair-${incidentName}.md`]
-    try {
-      for (const entry of readdirSync(HOME)) {
-        if (!entry.includes(incidentName)) continue
-        const path = `${HOME}\\${entry}`
-        candidates.push(statSync(path).isDirectory() ? `${path}\\repair-report.md` : path)
-      }
-    } catch { /* $DSH_HOME always exists in practice */ }
-    const found = candidates.find((p) => existsSync(p))
-    if (found !== undefined && found !== `${dir}\\repair-report.md`) {
-      try { copyFileSync(found, `${dir}\\repair-report.md`) } catch { /* keep going */ }
-    }
-    actions.push(`L1/L1.5 修复阶梯：${repaired ? 'REPAIRED（启动探针通过）' : `未修好（exit=${r.code}）`}；报告：${found ?? '未找到（只记警告）'}`)
-    if (!repaired) actions.push(`三级都没救回来 → 通用说明已放到 ${FIXED}（由固定脚本写入）`)
-  } else {
-    actions.push('L1 未启用（设 DSH_SUPERVISOR_REPAIR_AGENT=1 可让有界修复会话接手）')
-  }
-} else {
-  actions.push('未请求修复（--repair 未给出）：仅收集证据')
+  actions.push(`无需 L0 修复：闸门${gatePassed ? '已通过' : '未通过'}且未发现副本漂移（该故障不在 L0 的允许清单内）`)
 }
 
-// ── 4. report ─────────────────────────────────────────────────────────────
+// ── L1: run whenever the host exited non-zero and L0 did not demonstrably fix it ───────────
+// The signal is the HOST'S NON-ZERO EXIT — that is why this supervisor is running at all. It is NOT
+// "the gate now passes": the gate is deliberately fail-open and knows nothing about bootability, so a
+// passing gate says nothing about whether the host can start. An earlier revision gated the ladder on
+// the post-L0 gate verdict and therefore skipped it exactly when the gate was blind — measured live on
+// 2026-09-27: a syntax error the gate could not see (source and installed copy byte-identical, so no
+// drift) produced `闸门：PASS`, and the ladder was skipped while the host could not boot at all.
+//
+// Skipping is therefore an explicit OPT-IN (DSH_SELFHEAL_TRUST_L0=1) for people who would rather not
+// spend a call after a clean resync. The default is to attempt the repair; a bounded ladder that runs
+// when it was not needed costs one call, while one that does not run when it WAS needed leaves the
+// user with a host that cannot start.
+const trustL0 = process.env.DSH_SELFHEAL_TRUST_L0 === '1'
+const needLadder = !wantRepair ? false : trustL0 ? !l0Repaired : true
+if (!wantRepair) {
+  actions.push('未请求修复（--repair 未给出）：仅收集证据')
+} else if (!needLadder) {
+  actions.push('L1 未运行：L0 已完成一次干净的重同步且闸门通过，而 DSH_SELFHEAL_TRUST_L0=1 要求信任该结果（省一次 API 调用）')
+} else {
+  if (l0Repaired && !trustL0) actions.push('L0 已重同步且闸门通过，但闸门无法证明宿主真的能启动 → 仍然运行 L1')
+  if (!l0Repaired && hasDrift) actions.push('L0 未能消除漂移（或已被冷却跳过）→ 交 L1')
+  if (!hasDrift) actions.push(`闸门${gatePassed ? '通过' : '未通过'}但宿主确实非零退出，而 L0 无漂移可修 → 交 L1`)
+  await runLadder()
+}
+
+// ── 4. relaunch decision (BEFORE the summary, so it is actually recorded) ──
+// This used to be computed AFTER summary.md was written, so the relaunch outcome was absent from both
+// the summary and the printed actions — measured on a live incident 2026-09-27: the ladder verifiably
+// repaired the host (`启动探针 ALIVE`), the summary said REPAIRED, and nothing anywhere said why the
+// host was still down. The decision has to exist before the report that describes it.
+//
+// DEFAULT-ON after a VERIFIED repair. Relaunch used to need DSH_SUPERVISOR_RELAUNCH=1, which nothing in
+// the launcher ever set, so a successful repair always ended with the operator restarting by hand — the
+// kit fixed the fault and then left the host down. A repair that is proven by a boot probe and a passing
+// gate is exactly when coming back up is safe, and the guards below bound the risk:
+//   - only after a VERIFIED repair (L0 resync confirmed, or the ladder's boot probe returned ALIVE),
+//   - only when the gate allows a launch right now,
+//   - at most once per cooldown window (recorded in attempts.json), so a crash loop cannot form.
+// Opt out with DSH_NO_RELAUNCH=1 (or force on/off with DSH_SUPERVISOR_RELAUNCH=0/1).
+const relaunchOptOut = process.env.DSH_NO_RELAUNCH === '1' || process.env.DSH_SUPERVISOR_RELAUNCH === '0'
+const relaunchOptIn = process.env.DSH_SUPERVISOR_RELAUNCH === '1'
+const gateAllowsLaunch = run(NODE, [GATE]).ok
+const repairVerified = l1Repaired || l0Repaired
+const relaunchWanted = wantRepair && repairVerified && gateAllowsLaunch && !relaunchOptOut
+const relaunchAllowed = relaunchWanted && (relaunchOptIn || recent.length < MAX_ATTEMPTS)
+const relaunch = relaunchAllowed && recent.length < MAX_ATTEMPTS
+if (!wantRepair) {
+  // nothing to do
+} else if (relaunch) {
+  recordAttempt('relaunch')
+  run('cmd.exe', ['/c', 'start', '', LAUNCHER])
+  actions.push(`已自动重启一次（修复已由启动探针/闸门确认；${relaunchOptIn ? 'DSH_SUPERVISOR_RELAUNCH=1' : '默认行为'}）`)
+} else if (!repairVerified) {
+  actions.push('未重启：修复未被证实（没有可确认的修复结果），留给人处理')
+} else if (!gateAllowsLaunch) {
+  actions.push('未重启：闸门当前拒绝启动，重启会立刻再崩一次')
+} else if (relaunchOptOut) {
+  actions.push('未重启：DSH_NO_RELAUNCH=1 / DSH_SUPERVISOR_RELAUNCH=0 要求不重启')
+} else {
+  actions.push(`未重启：${COOLDOWN_MS / 60000} 分钟内已达 ${MAX_ATTEMPTS} 次尝试上限，避免重启循环`)
+}
+
+// ── 5. report ─────────────────────────────────────────────────────────────
 const summary = [
   `# 宿主退出事故 ${stamp}（exit=${exitCode}）`,
   '',
@@ -264,15 +347,6 @@ const summary = [
   ''
 ].filter((l) => l !== '').join('\n')
 writeFileSync(`${dir}\\summary.md`, summary, 'utf8')
-
-const relaunch = process.env.DSH_SUPERVISOR_RELAUNCH === '1' && wantRepair && hasDrift && recent.length < MAX_ATTEMPTS
-if (relaunch) {
-  recordAttempt('relaunch')
-  run('cmd.exe', ['/c', 'start', '', LAUNCHER])
-  actions.push('已请求一次重启（DSH_SUPERVISOR_RELAUNCH=1）')
-} else if (process.env.DSH_SUPERVISOR_RELAUNCH === '1') {
-  actions.push('未重启（修复未发生或已达上限）')
-}
 
 // Never swallow this silently: the gate had exactly that bug (an empty catch hid an EBUSY for
 // a whole session). The console log is best-effort; our own log always gets the line.

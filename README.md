@@ -119,15 +119,48 @@ node <harness>\config\incident-repair.mjs --no-ladder
 | `DSH_SKIP_GATE=1` | Skip the gate once |
 | `DSH_NO_PAUSE=1` | Let the launcher window close by itself after a crash |
 | `DSH_NO_REPAIR_AGENT=1` | Do not start the repair ladder automatically |
-| `DSH_SUPERVISOR_RELAUNCH=1` | Allow one relaunch after a successful repair |
+| `DSH_SELFHEAL_TRUST_L0=1` | After L0 resyncs cleanly and the gate passes, skip the ladder (saves one call) |
+| `DSH_NO_RELAUNCH=1` | Do not relaunch automatically after a verified repair |
 | `-GateOnly` | Run the gate and exit with its verdict |
 | `--dry-run` (ladder) | Plan only. Launches **no** session and no probe, so it costs nothing |
 | `--no-ladder` (ladder) | Collect evidence and stop. Starts no rung at all |
 
+### L0 and L1 cascade, and why the gate is not the signal
+
+L0 (the one allow-listed `pnpm install` resync) and L1 (the bounded repair ladder) used to be mutually
+exclusive: drift meant L0 and nothing else. That made the ladder unreachable in the case that needs it
+most — **drift present and the resync unable to clear it**. They now cascade.
+
+The ladder runs whenever the host exited non-zero and L0 did not demonstrably fix it. Note what is
+*not* the signal: **a passing gate does not mean the host can start.** The gate is deliberately
+fail-open, so it stays silent about anything it cannot verify — measured on 2026-09-27, a plugin whose
+entry module had a syntax error (source and installed copy byte-identical, so no drift to report)
+produced `闸门：PASS` while the host could not boot at all. Gating the ladder on the gate verdict
+therefore withheld it exactly when the gate was blind.
+
+The one reliable fact is that **the host already exited non-zero** — that is why the supervisor is
+running. So the ladder is the default, and skipping it is an explicit opt-in: set
+`DSH_SELFHEAL_TRUST_L0=1` if you would rather not spend a call after a clean resync. A ladder that runs
+when it was not needed costs one call; one that does not run when it *was* needed leaves you with a
+host that cannot start.
+
+### It brings the host back up
+
+L1 and L0 both end the same way: **when the repair is verified, the host is relaunched.** A verified
+repair means the ladder's boot probe came back ALIVE, or L0's resync was followed by a passing gate. If
+the repair is not verified, the gate currently refuses, or `DSH_NO_RELAUNCH=1` is set, the supervisor
+records why and leaves the host down for a human.
+
+This is on by default because the alternative was measured and it was bad: the kit repaired the host,
+reported success, and then left it down, so the operator had to notice and restart by hand. Relaunching
+is bounded to **one per cooldown window** (recorded in `attempts.json`), so it cannot become a crash
+loop — a second launch that fails lands in the same bounded path as the first.
+
+
 ## Safety properties
 
 - The gate fails open; a missing or broken gate never blocks a launch.
-- The supervisor never changes the launcher exit code and never relaunches by default.
+- The supervisor never changes the launcher exit code, and relaunches **only** after a verified repair, at most once per cooldown window.
 - The only automatic repair is a reversible `pnpm install` re-sync, and it re-checks the gate afterwards.
 - The repair session runs with `workspace-write` rooted at `$DSH_HOME`, `approval: never`, telemetry and the session-log request field off; a write outside `$DSH_HOME` is denied by the sandbox, and the session contract tells it to stop and report instead of escalating.
 - Evidence is independent of the console window: rungs run detached, their logs land in the incident directory, and the verdict file is rewritten after every step.
