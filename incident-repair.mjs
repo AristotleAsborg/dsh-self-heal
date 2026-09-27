@@ -1,33 +1,43 @@
 /**
- * incident-repair.mjs — the repair LADDER: L1 (headless + repair overlay) →
- * L1.5 (factory `rescue` profile, same overlay) → fixed-位置 general guide.
+ * incident-repair.mjs — the repair LADDER: L1 (headless + repair overlay) → L1.5 (factory
+ * `rescue` profile, same overlay) → fixed-location general guide.
  *
- * Each rung runs AT MOST ONCE per invocation (the supervisor additionally caps how
- * often it may call this file). A rung is escalated past when its process fails OR
- * its output carries a boot-failure signature — a repair agent that cannot even boot
- * is exactly the case the next rung exists for.
+ * TWO DESIGN RULES, both learned the hard way in the 2026-09-27 live-fire tests:
  *
- * Isolation note: rung 1 uses `--profile headless` (no local plugins, no UI rows) and
- * rung 2 uses `--profile rescue` (created from the shipped template, so a broken
- * `$DSH_HOME` overlay or a broken profile tree cannot follow it there). Neither rung
- * passes `--patch $DSH_HOME/cordis.patch.yml`.
+ *  1. EVIDENCE MUST NOT DEPEND ON A WINDOW. The first streaming version used
+ *     execFileSync(..., { stdio: 'inherit' }): the session's output went to the launcher
+ *     console only, and when that window closed the whole tree — ladder, session and the
+ *     not-yet-written ladder.md / repair-report.md — died with it. One run left nothing but
+ *     the supervisor's four files. Now every rung runs DETACHED (its own process group) with
+ *     stdout+stderr redirected into the incident directory, the ladder tails that file into
+ *     the console for live progress, and ladder.md is rewritten after every step, so a killed
+ *     ladder still records how far it got.
+ *
+ *  2. A VERDICT MUST BE AN OUTCOME, NOT AN EXIT CODE. A rung that exited 0 having changed
+ *     nothing was recorded "ok" while the same record said "no report". A rung now counts as
+ *     repaired only when BOTH hold: the agent wrote repair-report.md, AND a real boot probe of
+ *     the repaired composition (scratch port, hard timeout) survived.
  *
  * Usage:
  *   node incident-repair.mjs [--incident <dir>] [--prompt <file>] [--timeout-mins 10]
  *                            [--no-ladder] [--dry-run]
- *   test-only: --force-l1-fail  --force-l15-fail     (skip a rung without calling a model)
- * Exit: 0 = some rung ran, 2 = setup problem, 3 = every rung failed (guide written).
+ *   test-only: --force-l1-fail  --force-l15-fail   (skip a rung without calling a model)
+ * Exit: 0 = a rung repaired it, 2 = setup problem, 3 = not repaired (guide written).
  */
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 
 const NODE = 'D:\\dsh\\runtime\\node\\node.exe'
 const BIN = 'D:\\dsh\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
 const HOME = 'D:\\dsh\\home'
+const HOME_PATCH = `${HOME}\\cordis.patch.yml`
 const INCIDENTS = 'D:\\dsh\\state\\incidents'
+const SESSIONS = `${HOME}\\sessions`
 const OVERLAY = 'D:\\dsh\\config\\repair\\repair-overlay.yml'
 const PROMPT_FILE = 'D:\\dsh\\config\\repair\\repair-prompt.md'
 const GUIDE_WRITER = 'D:\\dsh\\config\\write-host-down-readme.mjs'
+const PROBE_PORT = 3081
+const PROBE_BUDGET_MS = 30000
 
 const argv = process.argv.slice(2)
 const opt = (name, fallback) => {
@@ -69,102 +79,151 @@ const footer = usingDefaultContract
 const task = [contract, '', ...footer].join('\n')
 writeFileSync(`${incident}\\repair-task.txt`, task, 'utf8')
 
-/** A rung's process failed, or its output carries a boot-failure signature. */
 const BOOT_FAIL = /plugin tree failed to load|failed to apply loader entry|unknown config key|ERR_MODULE_NOT_FOUND|Cannot find (module|package)|EADDRINUSE|bad option/iu
+const reportPath = `${incident}\\repair-report.md`
+const verdictOf = () => {
+  if (!existsSync(reportPath)) return 'NEEDS-HUMAN(无报告)'
+  const text = readFileSync(reportPath, 'utf8')
+  if (/READY-TO-RESTART/u.test(text)) return 'READY-TO-RESTART'
+  if (/NEEDS-HUMAN/u.test(text)) return 'NEEDS-HUMAN'
+  return '报告无明确结论'
+}
 
-/**
- * Run one rung. ONE array is used for the printed command and the executed one — the
- * first version printed a correct command and executed a broken one, so this asserts
- * the shape before running.
- */
-function runRung({ label, profile, forcedFail }) {
+/** Boot the CURRENT web composition on a scratch port and see whether it survives. This is
+ *  the falsifiable check: an exit code cannot tell us that a host boots. */
+function bootProbe() {
+  const log = `${incident}\\boot-probe.log`
+  writeFileSync(log, `(probe: port ${PROBE_PORT}, budget ${PROBE_BUDGET_MS / 1000}s)\n`, 'utf8')
+  const child = spawn(NODE, [BIN, '--profile', 'web', '--patch', HOME_PATCH, '--no-open', '--port', String(PROBE_PORT)], {
+    cwd: HOME, env: { ...process.env, DSH_HOME: HOME }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  return new Promise((resolve) => {
+    let out = ''
+    let settled = false
+    const finish = (verdict) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { child.kill() } catch { /* already gone */ }
+      writeFileSync(log, `${out}\n(probe verdict: ${verdict})\n`, 'utf8')
+      resolve(verdict)
+    }
+    const timer = setTimeout(() => finish('ALIVE（撑过预算，未见 URL）'), PROBE_BUDGET_MS)
+    child.stdout.on('data', (d) => { out += d; if (/dsh web: http/u.test(out)) finish('ALIVE（已 announce URL）') })
+    child.stderr.on('data', (d) => { out += d; if (BOOT_FAIL.test(out)) finish('DEAD（组合加载失败）') })
+    child.on('exit', (code) => finish(code === 0 ? 'EXITED-0（未 announce URL）' : `DEAD（exit=${code}）`))
+  })
+}
+
+/** Run one rung DETACHED so closing the console cannot destroy it, tail its log into this
+ *  console for live progress, and return the process outcome plus the durable output. */
+let rungSeq = 0
+function runDetached({ label, profile, forcedFail }) {
   const dshArgs = [BIN, '--profile', profile, '--patch', OVERLAY, 'headless', task]
   const printable = `${NODE} ${BIN} --profile ${profile} --patch ${OVERLAY} headless "<${task.length} 字符任务>"`
   if (dshArgs[0] !== BIN || dshArgs[1] !== '--profile' || dshArgs[3] !== '--patch') {
     console.error('incident-repair: 内部断言失败：执行参数与预期形状不一致')
     process.exit(2)
   }
-  console.log(`[repair] ${label}：${printable}`)
-  console.log(`[repair] ${label}：DSH_HOME=${HOME}（显式传递；不传 CLI 会回落到默认 home）`)
-  if (forcedFail === true) return { ok: false, bootFailure: true, out: '(test-only forced failure)', code: 'forced' }
-  if (dryRun) return { ok: true, bootFailure: false, out: '(dry-run)', code: 'dry-run' }
-  try {
-    // DSH_HOME must be handed over explicitly. The supervisor is started by the launcher, whose
-    // environment carries no DSH_HOME, so the CLI fell back to the DEFAULT home
-    // (C:\Users\ASUS\.dsh): the ladder loaded ANOTHER installation's headless profile
-    // ("profile rescue does not exist" + a permission-preset refusal) while the sandbox write
-    // boundary still pointed at D:\dsh\home. Measured in the 2026-09-27 live-fire test.
-    const out = execFileSync(NODE, dshArgs, {
-      cwd: HOME,
-      env: { ...process.env, DSH_HOME: HOME },
-      encoding: 'utf8',
-      timeout: timeoutMins * 60 * 1000,
-      maxBuffer: 64 * 1024 * 1024,
+  rungSeq += 1
+  const logPath = `${incident}\\repair-live-${rungSeq}.log`
+  writeFileSync(logPath, `(detached rung; DSH_HOME=${HOME})\n`, 'utf8')
+  console.log(`\n[repair] ${label}`)
+  console.log(`[repair] 命令：${printable}`)
+  console.log(`[repair] DSH_HOME=${HOME}（显式传递；不传 CLI 会回落到默认 home）`)
+  console.log(`[repair] 现场日志（与窗口无关）：${logPath}`)
+  if (forcedFail === true) { writeFileSync(logPath, '(test-only forced failure)\n', 'utf8'); return Promise.resolve({ ok: false, code: 'forced', out: '(forced)' }) }
+  if (dryRun) { writeFileSync(logPath, '(dry-run)\n', 'utf8'); return Promise.resolve({ ok: true, code: 'dry-run', out: '(dry-run)' }) }
+
+  const fd = openSync(logPath, 'a')
+  const child = spawn(NODE, dshArgs, {
+    cwd: HOME, env: { ...process.env, DSH_HOME: HOME }, detached: true, stdio: ['ignore', fd, fd],
+  })
+  closeSync(fd)
+  let seen = 0
+  const tick = setInterval(() => {
+    try {
+      const text = readFileSync(logPath, 'utf8')
+      if (text.length > seen) { process.stdout.write(text.slice(seen)); seen = text.length }
+    } catch { /* still being written */ }
+  }, 400)
+  const killTimer = setTimeout(() => { try { child.kill() } catch { /* gone */ } }, timeoutMins * 60 * 1000)
+  return new Promise((resolve) => {
+    child.on('exit', (code) => {
+      clearInterval(tick)
+      clearTimeout(killTimer)
+      const out = readFileSync(logPath, 'utf8')
+      process.stdout.write(out.slice(seen))
+      resolve({ ok: code === 0, code, out, bootFailure: BOOT_FAIL.test(out) })
     })
-    return { ok: true, bootFailure: BOOT_FAIL.test(out), out, code: 0 }
-  } catch (error) {
-    const out = `${error.stdout ?? ''}${error.stderr ?? ''}${String(error.message)}`
-    return { ok: false, bootFailure: BOOT_FAIL.test(out), out, code: error.status ?? null }
-  }
+  })
 }
 
 const rungs = []
-const record = (label, r) => {
-  rungs.push({ label, ok: r.ok, bootFailure: r.bootFailure, code: r.code })
-  writeFileSync(`${incident}\\repair-agent-output-${rungs.length}.txt`, r.out, 'utf8')
-  console.log(`[repair] ${label} → ${r.ok ? 'ok' : `failed(exit=${r.code})`}${r.bootFailure ? '，且判定为"起不来"' : ''}；输出 ${r.out.length} 字符`)
+function writeLadder(pending) {
+  writeFileSync(`${incident}\\ladder.md`, [
+    `# 修复阶梯结果（${pending}）`,
+    '',
+    `- 事故目录：${incident}`,
+    '- 判据：**代理报告 + 启动探针**（进程退出码不算数）',
+    '',
+    '| 级 | 进程 | 报告 | 启动探针 | 判定 |',
+    '| --- | --- | --- | --- | --- |',
+    ...rungs.map((r) => `| ${r.label} | ${r.process} | ${r.report} | ${r.probe ?? '—'} | ${r.verdict} |`),
+    '',
+  ].join('\n'), 'utf8')
+}
+
+async function runRung({ label, profile, forcedFail }) {
+  const r = await runDetached({ label, profile, forcedFail })
+  const report = verdictOf()
+  const probe = dryRun ? '（dry-run 未探测）' : await bootProbe()
+  const processText = r.ok ? 'ok' : `failed(exit=${r.code})`
+  const repaired = r.ok && existsSync(reportPath) && /^(ALIVE|READY)/u.test(probe)
+  rungs.push({ label, process: processText, report, probe, verdict: repaired ? 'REPAIRED' : 'NOT-REPAIRED' })
+  writeLadder(`${label} 已结束`)
+  console.log(`[repair] ${label} → 进程 ${processText}；报告 ${report}；启动探针 ${probe} ⇒ ${repaired ? 'REPAIRED ✓' : 'NOT-REPAIRED'}`)
+  return repaired
 }
 
 // ── rung 1: L1 ─────────────────────────────────────────────────────────────
-const rung1 = runRung({ label: 'L1 headless + 修复 overlay', profile: 'headless', forcedFail: flag('--force-l1-fail') })
-record('L1', rung1)
-let report = `${incident}\\repair-report.md`
-let escalated = !rung1.ok || rung1.bootFailure
+let repaired = await runRung({ label: 'L1 headless + 修复 overlay', profile: 'headless', forcedFail: flag('--force-l1-fail') })
 
 // ── rung 2: L1.5 factory profile ───────────────────────────────────────────
-if (ladder && escalated) {
-  const rescueDir = `${HOME}\\profiles\\rescue`
-  if (!existsSync(rescueDir)) {
-    rungs.push({ label: 'L1.5 rescue', ok: false, bootFailure: false, code: 'missing-profile' })
+if (ladder && !repaired) {
+  if (!existsSync(`${HOME}\\profiles\\rescue`)) {
+    rungs.push({ label: 'L1.5 rescue', process: 'missing-profile', report: '—', probe: '—', verdict: 'NOT-REPAIRED' })
+    writeLadder('L1.5 缺 profile')
     console.log('[repair] L1.5：没有出厂 profile；先建：node bin.js rescue --from-default-profile headless --dump-config')
   } else {
-    const rung2 = runRung({ label: 'L1.5 出厂 rescue profile + 修复 overlay', profile: 'rescue', forcedFail: flag('--force-l15-fail') })
-    record('L1.5', rung2)
-    escalated = !rung2.ok || rung2.bootFailure
+    repaired = await runRung({ label: 'L1.5 出厂 rescue profile + 修复 overlay', profile: 'rescue', forcedFail: flag('--force-l15-fail') })
   }
 }
 
 // ── rung 3: the fixed guide at the fixed location ──────────────────────────
 let guideWritten = false
-if (ladder && escalated && !dryRun) {
+if (ladder && !repaired && !dryRun) {
   try {
-    const out = execFileSync(NODE, [GUIDE_WRITER, '--incident', incident], { encoding: 'utf8' })
-    console.log(out.trim())
+    console.log(execFileSync(NODE, [GUIDE_WRITER, '--incident', incident], { encoding: 'utf8' }).trim())
     guideWritten = true
   } catch (error) {
     console.error(`[repair] 写通用说明失败：${String(error.stdout ?? error.message).slice(0, 200)}`)
   }
 }
 
-const ladderText = [
-  `# 修复阶梯结果 ${new Date().toISOString()}`,
-  '',
-  '| 级 | 结果 | 退出码 | 判定 |',
-  '| --- | --- | --- | --- |',
-  ...rungs.map((r) => `| ${r.label} | ${r.ok ? 'ok' : 'failed'} | ${r.code} | ${r.bootFailure ? '起不来' : '—'} |`),
-  '',
-  `- 代理报告：${existsSync(report) ? report : '未生成'}`,
-  `- 通用说明：${guideWritten ? 'D:\\dsh\\HOST-DOWN-README.md（已写）' : '未写'}`,
-  ''
-].join('\n')
-writeFileSync(`${incident}\\ladder.md`, ladderText, 'utf8')
+// ── final record ───────────────────────────────────────────────────────────
+writeLadder(guideWritten ? '已收尾：写通用说明' : '已收尾')
+const sessions = existsSync(SESSIONS)
+  ? readdirSync(SESSIONS, { withFileTypes: true }).filter((e) => e.isDirectory())
+    .flatMap((e) => readdirSync(`${SESSIONS}\\${e.name}`, { withFileTypes: true })
+      .filter((s) => s.isDirectory())
+      .map((s) => `${SESSIONS}\\${e.name}\\${s.name}`))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]
+  : undefined
 
-console.log(`[repair] 阶梯：${rungs.map((r) => `${r.label}=${r.ok ? 'ok' : 'fail'}`).join(' → ')}`)
-if (existsSync(report)) {
-  const text = readFileSync(report, 'utf8')
-  console.log(`[repair] 报告结论：${/READY-TO-RESTART/u.test(text) ? 'READY-TO-RESTART' : (/NEEDS-HUMAN/u.test(text) ? 'NEEDS-HUMAN' : '（无明确结论）')}`)
-} else {
-  console.log('[repair] 未生成 repair-report.md（视为 NEEDS-HUMAN）')
-}
-console.log(`[repair] 明细：${incident}\\ladder.md`)
-process.exit(escalated ? 3 : 0)
+console.log(`\n[repair] 阶梯：${rungs.map((r) => `${r.label}=${r.verdict}`).join(' → ')}`)
+console.log(`[repair] 修复报告：${existsSync(reportPath) ? reportPath : '未生成（视为 NEEDS-HUMAN）'}`)
+console.log(`[repair] 分级判定：${incident}\\ladder.md`)
+if (sessions !== undefined) console.log(`[repair] 完整修复会话记录：${sessions}（session.v3.jsonl.zstd）`)
+if (guideWritten) console.log('[repair] 通用说明：D:\\dsh\\HOST-DOWN-README.md')
+process.exit(repaired ? 0 : 3)

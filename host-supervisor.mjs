@@ -24,8 +24,8 @@
  * Usage: node host-supervisor.mjs --exit-code <n> [--repair] [--print] [--no-print]
  * Exit:  always 0 (the launcher owns the exit code).
  */
-import { execFileSync, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 
 const NODE = 'D:\\dsh\\runtime\\node\\node.exe'
 const BIN = 'D:\\dsh\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
@@ -67,13 +67,31 @@ function run(file, args, options = {}) {
   }
 }
 
-/** Run a command with its output INHERITED by this console, so long steps show live progress.
- *  The launcher window is the only place the operator watches; a buffered call would show
- *  nothing for the minutes the repair ladder can take. Evidence still lands in the incident
- *  directory (the ladder writes ladder.md and repair-agent-output-*.txt itself). */
+/** Run a command DETACHED with its output in a file, and tail that file into this console.
+ *  WHY: the previous version inherited this console, so closing the window killed the ladder,
+ *  its session and every file it had not written yet — the 18:25 live-fire run left no verdict
+ *  at all. Detached means the work and its evidence survive the window; the tail keeps the
+ *  progress visible while the window is open. */
 function runStream(file, args, options = {}) {
-  const result = spawnSync(file, args, { stdio: 'inherit', ...options })
-  return { ok: result.status === 0, code: result.status, out: '(streamed to this console)' }
+  const logPath = options.logPath ?? 'D:\\dsh\\state\\ladder-live.log'
+  writeFileSync(logPath, '(detached; output mirrored here)\n', 'utf8')
+  const fd = openSync(logPath, 'a')
+  const child = spawn(file, args, { detached: true, stdio: ['ignore', fd, fd], env: { ...process.env, DSH_HOME: HOME } })
+  closeSync(fd)
+  let seen = 0
+  const tick = setInterval(() => {
+    try {
+      const text = readFileSync(logPath, 'utf8')
+      if (text.length > seen) { process.stdout.write(text.slice(seen)); seen = text.length }
+    } catch { /* still being written */ }
+  }, 400)
+  return new Promise((resolve) => {
+    child.on('exit', (code) => {
+      clearInterval(tick)
+      try { process.stdout.write(readFileSync(logPath, 'utf8').slice(seen)) } catch { /* ignore */ }
+      resolve({ ok: code === 0, code, out: "see " + logPath })
+    })
+  })
 }
 
 // ── 1. evidence ───────────────────────────────────────────────────────────
@@ -125,6 +143,18 @@ function runPnpmInstall() {
 }
 
 // ── 3. allow-listed repair ────────────────────────────────────────────────
+// Write an initial summary NOW, before anything long-running starts: the 18:25 run was killed
+// while the ladder was working and left no summary.md at all. The full summary below
+// overwrites this one at the end.
+writeFileSync(`${dir}\\summary.md`, [
+  `# 宿主退出事故 ${stamp}（exit=${exitCode}）`,
+  '',
+  `- 分类：${classes.join(', ')}`,
+  `- 闸门：${gatePassed ? 'PASS' : 'REFUSED'}`,
+  `- 副本漂移：${hasDrift ? '有' : '无'}`,
+  '- 状态：修复判定进行中；阶梯进度见控制台与 ladder.md / ladder-live.log',
+  '',
+].join('\n'), 'utf8')
 const actions = []
 function attempts() {
   try {
@@ -159,7 +189,7 @@ if (wantRepair && hasDrift) {
   // Off by default because it spends API tokens and lets a model edit config files
   // unattended (bounded by repair-overlay.yml: workspace-write@$DSH_HOME + never).
   if (process.env.DSH_SUPERVISOR_REPAIR_AGENT === '1') {
-    const r = runStream(NODE, ['D:\\dsh\\config\\incident-repair.mjs', '--ladder', '--incident', dir, '--timeout-mins', '10'])
+    const r = await runStream(NODE, ['D:\\dsh\\config\\incident-repair.mjs', '--ladder', '--incident', dir, '--timeout-mins', '10'], { logPath: `${dir}\\ladder-live.log` })
     const report = existsSync(`${dir}\\repair-report.md`)
     actions.push(`L1/L1.5 修复阶梯已调用（${r.ok ? 'ok' : `failed(exit=${r.code})`}）；报告：${report ? '已生成' : '未生成'}`)
     if (!report) actions.push('三级都没救回来 → 通用说明已放到 D:\\dsh\\HOST-DOWN-README.md（由固定脚本写入）')
