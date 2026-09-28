@@ -58,22 +58,46 @@ $ dsh --profile desktop --dump-config
 error: profile "desktop" is managed exclusively by the Electron application
 ```
 
-That is the shipping CLI's own guard, not an inference. It matters here for two structural reasons:
+That is the shipping CLI's own guard, not an inference. The official desktop documentation in the
+`deepseek-ai/deepseek-harness` repository describes the rest of the picture, and it is a deliberate
+separation rather than an oversight:
+
+- The desktop app is `apps/desktop`, published as `@deepseek-ai/dsh-desktop` with **`"private": true`** —
+  which is why there is no such npm package. It ships as an installer from `download.deepseek.com`.
+- Electron starts a RunAsNode child that runs **the shared profile runner**, and the signed app serves the
+  bundled `dsh` and its production dependencies from `resources/app.asar/dsh`. The profile therefore only
+  installs *external* plugins.
+- Electron takes a single-instance lock and **owns `$DSH_HOME/profiles/desktop` exclusively**, along with
+  its package-manager state. In the project's own words, the CLI and the desktop app "share the supported
+  product data under `$DSH_HOME`, but never the executable packages, plugin activation, lockfiles or
+  `node_modules`" — and **"the CLI cannot boot or modify this profile."**
+- The desktop app listens on port **19387** by default, separate from Web's `3080`.
+
+It matters here for two structural reasons:
 
 1. The gate runs *before* the CLI boots and the supervisor runs *on the launcher's exit code*. An Electron
-   app owns both moments, so there is no point at which this kit could insert itself — and the kit does not
-   try to wrap or modify a GUI application's startup.
+   app owns both moments — and already ships its own recovery dialog for a fatal startup failure (restart,
+   disable third-party plugins, back up the profile patch). There is no point at which this kit could insert
+   itself, and the kit does not try to wrap or modify a GUI application's startup.
 2. Pointing this kit at the desktop profile cannot work: every command it calls would be rejected by that
    guard. The installer and the gate do not need you to discover this by experiment — do not set
-   `profile: "desktop"`.
+   `profile: "desktop"` (the installer refuses it outright).
+
+**Both do share one thing, so mind it.** The desktop app and the CLI share `$DSH_HOME`, and the home-level
+patch `$DSH_HOME/cordis.patch.yml` is applied when the CLI composes its tree — verified here by removing it
+and re-dumping, which changed the composition (656 lines to 636). The desktop's profile keeps the same home
+patch. So if you install this kit *and* run the desktop app on the same home, treat that one file as shared:
+the repair session is allowed to edit it, and an edit there is not confined to your CLI profile. That is
+recorded as a caveat, not as a claim that the kit manages the desktop app — it does not.
 
 If you run the desktop app, run this kit against your CLI installation (`dsh`/`dsh web`) as its own thing.
 They can coexist; they are separate lifecycles.
 
 **How far this was checked**: the CLI compatibility above is a comparison of the two published releases
 (contracts, emitters and guards read out of the tarballs), **not** an end-to-end run of the kit on 0.1.7.
-The kit has never been run against the desktop app at all — that column is a structural judgement from the
-CLI's own guard plus the app's architecture, and it is stated as such.
+The desktop facts above come from the official repository's `apps/desktop` documentation and manifest, but
+**the kit has never been run against the desktop app at all** — no desktop build was installed on this
+machine, so there was nothing to run it against.
 
 ## What it does
 
