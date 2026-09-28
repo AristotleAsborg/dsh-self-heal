@@ -21,6 +21,60 @@ existing launcher, and it runs whether or not anyone is watching:
 Everything below describes what those automatic steps do and how to read their output. The one deliberate
 exception is documented under "Safety properties": recovery is bounded, and it stops rather than looping.
 
+## What it is compatible with
+
+**It wraps the `dsh` command line, so it works with any DSH version whose CLI keeps the interfaces it
+uses.** That is a small, stable surface, and which parts of it were checked is stated below rather than
+assumed.
+
+| Against | Status |
+| --- | --- |
+| `dsh` CLI `0.1.6-alpha.2` | The version this kit was developed and measured on. |
+| `dsh` CLI `0.1.7-rc.2` | **Compatible** — checked by comparing the two releases, see below. |
+| **The official desktop (Electron) app** | **Not supported.** It has its own launcher and lifecycle, and the CLI explicitly refuses its profile. Details below. |
+
+What the kit uses, and why version changes rarely reach it:
+
+- **Six CLI affordances only**: `--profile`, `--patch`, `--dump-config`, `--from-default-profile`,
+  `--help`, `--version`. The kit never imports a DSH internal module, so the internals are free to move.
+- **The `--dump-config` YAML**, which the gate parses by hand. This is the one real coupling, so it was
+  compared directly: `renderConfigDump`, `groupedDump` and the `!!js` schema type in
+  `@deepseek-ai/dsh-app-boot` are **byte-identical** between those two versions. The dump format did not
+  change.
+- **Your profile layout**: `package.json` with `dsh.profile.bundles`, plus `cordis.patch.yml` layers, in
+  that order. Unchanged between the two versions.
+- **Your local plugins**, which declare **no DSH peer ranges** — so the plugin/runtime compatibility gate
+  introduced in 0.1.7 does not apply to them. That gate only evaluates a manifest that actually declares
+  `peerDependencies`.
+
+### The desktop app is a different entry point, not a version
+
+The official desktop client is Electron and reuses the Web UI and the same agent/session/plugin logic, but
+it is launched by its own application rather than by `dsh`, and the CLI **reserves the `desktop` profile
+for it**:
+
+```
+$ dsh --profile desktop --dump-config
+error: profile "desktop" is managed exclusively by the Electron application
+```
+
+That is the shipping CLI's own guard, not an inference. It matters here for two structural reasons:
+
+1. The gate runs *before* the CLI boots and the supervisor runs *on the launcher's exit code*. An Electron
+   app owns both moments, so there is no point at which this kit could insert itself — and the kit does not
+   try to wrap or modify a GUI application's startup.
+2. Pointing this kit at the desktop profile cannot work: every command it calls would be rejected by that
+   guard. The installer and the gate do not need you to discover this by experiment — do not set
+   `profile: "desktop"`.
+
+If you run the desktop app, run this kit against your CLI installation (`dsh`/`dsh web`) as its own thing.
+They can coexist; they are separate lifecycles.
+
+**How far this was checked**: the CLI compatibility above is a comparison of the two published releases
+(contracts, emitters and guards read out of the tarballs), **not** an end-to-end run of the kit on 0.1.7.
+The kit has never been run against the desktop app at all — that column is a structural judgement from the
+CLI's own guard plus the app's architecture, and it is stated as such.
+
 ## What it does
 
 | Stage | File | Behaviour |

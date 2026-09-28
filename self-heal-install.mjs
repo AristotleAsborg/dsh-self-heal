@@ -232,6 +232,20 @@ function writeConfig() {
   }
   if (typeof previous !== 'object' || previous === null || Array.isArray(previous)) previous = {}
   const PROFILE = opt('--profile', previous.profile ?? 'web')
+  // The CLI reserves the `desktop` profile for the Electron app and rejects every command that names it:
+  //   error: profile "desktop" is managed exclusively by the Electron application
+  // This kit drives the CLI (gate composes the tree, supervisor re-checks it, the ladder probes it), so a
+  // `desktop` profile would make every one of those calls fail with that message. Refuse it here, at
+  // install time, where the fix is obvious — rather than letting it surface later as a CLI error from a
+  // script the operator did not invoke by hand.
+  if (PROFILE.toLowerCase() === 'desktop') {
+    say('[FAIL] profile "desktop" 由 Electron 桌面端独占，CLI 会拒绝一切指名它的命令；本套件驱动 CLI，无法使用它。')
+    say('       请指向你的 CLI profile（默认 web）。桌面端与本套件是两套独立生命周期。')
+    problems.push('profile "desktop" is reserved for the Electron desktop app')
+    // Fail FAST: do not write a config naming a profile every later call will be rejected for. Writing it
+    // and then reporting failure leaves a half-installed harness whose gate can never pass.
+    return
+  }
   const PORT = Number(opt('--port', String(previous.port ?? 3080)))
   const PROBE_PORT = Number(opt('--probe-port', String(previous.probePort ?? PORT + 1)))
   // `state` / `incidents` / `log` follow the SAME rule as profile/port: they are exactly the kind of
