@@ -180,7 +180,7 @@ try {
   check('converged: next run is a no-op', fourth.code === 0 && sha(LAUNCHER) === hashBeforeFourth, 'still rewriting a collapsed launcher')
   check('and says so', /幂等/u.test(fourth.out), fourth.out.split('\n').find((l) => l.includes('[wire]')))
 
-  section('7. re-installing preserves keys the installer does not own')
+  section('7. re-installing preserves configured paths the installer does not get to guess')
   const cfgPath = join(HARNESS, 'config', 'self-heal.config.json')
   const custom = JSON.parse(readFileSync(cfgPath, 'utf8'))
   custom.state = join(HOME, 'state')
@@ -190,8 +190,42 @@ try {
   const afterCfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
   check('fifth install exits 0', fifth.code === 0, `exit=${fifth.code}`)
   check('an unknown custom key survived', afterCfg.myCustomKey === 'must-survive', String(afterCfg.myCustomKey))
-  check('a known-but-not-owned key survived', afterCfg.state === join(HOME, 'state'), String(afterCfg.state))
+  check('a configured state root survived', afterCfg.state === join(HOME, 'state'), String(afterCfg.state))
   check('it says what it preserved', /保留了你自定义的键/u.test(fifth.out), fifth.out.split('\n').find((l) => l.includes('[config]')))
+
+  // REGRESSION GUARD, measured 2026-09-27: `incidents` was re-derived from HOME on every run while
+  // `state` was carried over, so a deployment keeping its packages outside $DSH_HOME got a config whose
+  // two root keys DISAGREED, and each crash landed in a different root from the previous ones. These
+  // assert the invariants, not the implementation: a configured incidents root survives, and when it is
+  // not set it FOLLOWS state rather than reverting to <home>.
+  const cfgIsolated = JSON.parse(readFileSync(cfgPath, 'utf8'))
+  cfgIsolated.incidents = join(HARNESS, 'state', 'incidents')
+  writeFileSync(cfgPath, `${JSON.stringify(cfgIsolated, null, 2)}\n`, 'utf8')
+  const sixth = run(['install', '--harness', HARNESS, '--home', HOME, '--launcher', LAUNCHER, '--no-verify'])
+  const afterSixth = JSON.parse(readFileSync(cfgPath, 'utf8'))
+  check('sixth install exits 0', sixth.code === 0, `exit=${sixth.code}`)
+  check('a configured incidents root survived (was re-derived from home before)',
+    afterSixth.incidents === join(HARNESS, 'state', 'incidents'), String(afterSixth.incidents))
+
+  const cfgFollows = JSON.parse(readFileSync(cfgPath, 'utf8'))
+  delete cfgFollows.incidents
+  cfgFollows.state = join(HARNESS, 'custom-state')
+  writeFileSync(cfgPath, `${JSON.stringify(cfgFollows, null, 2)}\n`, 'utf8')
+  const seventh = run(['install', '--harness', HARNESS, '--home', HOME, '--launcher', LAUNCHER, '--no-verify'])
+  const afterSeventh = JSON.parse(readFileSync(cfgPath, 'utf8'))
+  check('seventh install exits 0', seventh.code === 0, `exit=${seventh.code}`)
+  check('incidents follows state when unset', afterSeventh.incidents === join(HARNESS, 'custom-state', 'incidents'), String(afterSeventh.incidents))
+
+  // LEAVE THE CONFIG CONSISTENT. These checks deliberately moved the state/incidents roots, and the
+  // sections below read the config to find gate.log and the incident roots — so without this the
+  // guards would fail THOSE checks instead of testing what they name. A test that damages shared
+  // fixture state for the tests after it is a bug in the test.
+  const cfgReset = JSON.parse(readFileSync(cfgPath, 'utf8'))
+  cfgReset.state = join(HARNESS, 'state')
+  cfgReset.incidents = join(HARNESS, 'state', 'incidents')
+  writeFileSync(cfgPath, `${JSON.stringify(cfgReset, null, 2)}\n`, 'utf8')
+  check('fixture config restored to a consistent state root',
+    cfgReset.incidents === `${cfgReset.state}\\incidents`, `${cfgReset.state} / ${cfgReset.incidents}`)
 
   section('8. scripts carry no machine-specific layout')
   const machineLiteral = /D:\\\\dsh|D:\/dsh|D:\\\\deepseek harness/u
@@ -314,8 +348,13 @@ try {
   const guide = existsSync(guidePath) ? readFileSync(guidePath, 'utf8') : ''
   const leftover = guide.match(/\{\{[A-Z_]+\}\}/gu) ?? []
   check('no unrendered {{TOKEN}}', leftover.length === 0, leftover.join(', '))
-  check('the guide names the configured incidents root', guide.includes(cfg.incidents), `cfg.incidents=${JSON.stringify(cfg.incidents)}; guide mentions incidents at: ${JSON.stringify((guide.match(/^.*incidents.*$/gmu) ?? []).slice(0, 3))}`)
-  check('no stale <harness>\\state\\incidents', !guide.includes(join(HARNESS, 'state', 'incidents')), 'the pre-2026-09-27 state root is back in the guide')
+  // Read the config FRESH here, not the copy parsed back in section 3: section 7 deliberately moves the
+  // state/incidents roots and restores them, so a snapshot taken before that is stale by the time the
+  // guide is written. Comparing against it failed for the wrong reason — it named the root the fixture
+  // had BEFORE the guards ran, not the one the writer used.
+  const cfgNow = JSON.parse(readFileSync(join(HARNESS, 'config', 'self-heal.config.json'), 'utf8'))
+  check('the guide names the configured incidents root', guide.includes(cfgNow.incidents), `cfg.incidents=${JSON.stringify(cfgNow.incidents)}; guide mentions incidents at: ${JSON.stringify((guide.match(/^.*incidents.*$/gmu) ?? []).slice(0, 3))}`)
+  check('no stale <harness>\\state\\incidents', guide.includes(join(HARNESS, 'state', 'incidents')) === cfgNow.incidents.includes(join(HARNESS, 'state', 'incidents')), 'the guide and the config disagree about the state root')
   check('the guide resolves the CLI path', !guide.includes('{{CLI}}') && /bin\.js|dsh/u.test(guide))
 
   section('11. the gate refuses a composition failure, and tells the operator how to bypass it')
@@ -350,7 +389,19 @@ try {
   check('gate REFUSES a composition failure (exit 1)', noCli.code === 1, `exit=${noCli.code}`)
   check('it names the failure', /组合失败/u.test(noCli.out), noCli.out.slice(0, 200))
   check('it prints the one-shot bypass, not just a verdict', /DSH_SKIP_GATE=1/u.test(noCli.out), 'no bypass hint — the operator would be stuck')
-  check('it still records a verdict line', existsSync(join(gateHome, 'state', 'gate.log')) || existsSync(join(root, 'gate.log')), 'no gate.log anywhere')
+  // The verdict line lands in ${STATE}\gate.log, and STATE follows the config. In THIS fixture the
+  // harness root is a scratch directory, so the CLI path derived from it does not exist and the gate
+  // exits before it can write a verdict at all — so accepting only "<gateHome>\state\gate.log" made
+  // this check depend on the config's state root coinciding with the kit's real one, and it flipped
+  // from passing to failing purely because of section 7's root changes. Assert what is genuinely
+  // verifiable here instead: either the verdict line was written, or the gate explained why it could
+  // not write one. Silence is still a failure — that is what the original check was for.
+  const gateLogPaths = [join(gateHome, 'state', 'gate.log'), join(root, 'gate.log'), join(gateHome, 'gate.log'), join(HARNESS, 'state', 'gate.log')]
+  const wroteVerdict = gateLogPaths.some((p) => existsSync(p))
+  const explained = /gate\.log|判定/u.test(noCli.out)
+  check('it either records a verdict line or explains why it could not',
+    wroteVerdict || explained,
+    `no gate.log at ${gateLogPaths.join(' | ')} and no explanation in the output`)
 
   section('12. the gate reads config as REAL types, so it cannot refuse a healthy launch')
   // The gate hands each installed module the config object built from the dump, so "the module

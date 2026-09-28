@@ -272,17 +272,17 @@ ladder.md  ladder-live.log  repair-live-1.log  repair-task.txt  summary.md
 ```
 
 `gate.txt`, `console-tail.txt` and `dump-config.txt` are essentially always there; `ladder.md` only
-if the ladder ran. `repair-report.md` is frequently **absent from the package** — the repair session
-works inside `$DSH_HOME`, so its report normally lands in `$DSH_HOME\repair-<incident>\` and the
-supervisor copies it back on a best-effort basis. That is why a missing report is a warning and not a
-failure: the verdict is the boot probe.
+if the ladder ran (a package from an L0-only repair has neither). The repair session writes its report
+to `$DSH_HOME`, because the incident directory is outside its workspace, so the supervisor searches
+both `$DSH_HOME\repair-<incident>.md` and `$DSH_HOME\repair-report.md` and copies what it finds into
+the package. A missing report is a warning and not a failure: the verdict is the boot probe.
 
 **The ladder's verdict is a small table**, and `REPAIRED` is decided by the probe column, not the
 report column — the two legitimately disagree:
 
 ```
-| 级                        | 进程 | 报告                | 启动探针              | 判定     |
-| L1 headless + 修复 overlay | ok   | NEEDS-HUMAN(无报告) | ALIVE（已 announce URL） | REPAIRED |
+| 级                        | 进程 | 报告                     | 启动探针                 | 判定     |
+| L1 headless + 修复 overlay | ok   | D:\dsh\home\repair-….md | ALIVE（已 announce URL） | REPAIRED |
 ```
 
 ## Troubleshooting
@@ -295,10 +295,10 @@ report column — the two legitimately disagree:
 | `组合失败：…` | Composing the tree itself failed — the next boot would hit the same thing. The gate refuses and prints the bypass. Read the full error; do not assume it is the gate's fault. |
 | Host exits within a second of launch | Read `console-tail.txt` in the newest incident package and **quote the error verbatim before concluding anything**. A failing loader entry is fatal, so the real cause is usually the last entry named. |
 | `incident-repair: 没有事故目录（…）` | No incident exists to repair. Exit code 2, nothing was attempted. Not an error. |
-| Ladder ran but `repair-report.md` is missing | Expected and only a warning. The verdict is the boot probe in `boot-probe.log`; see the package layout above. |
+| Ladder ran but `repair-report.md` is missing | Only a warning; the verdict is the boot probe in `boot-probe.log`. The session writes to `$DSH_HOME`, so look for `repair-<incident>.md` there too — the supervisor copies it into the package when it finds it. |
 | Launcher window closes instantly after a crash | By design once `DSH_NO_PAUSE=1` is set. Unset it to keep the window and read the gate's output in place. |
 | `chcp`/mojibake: Chinese text looks doubled in the console | A console code-page artifact (CP936), not file corruption. The launcher already runs `chcp 65001`; if you invoke a script yourself, do the same. The files on disk are UTF-8. |
-| Incident packages are in `<harness>\state\incidents` but the config says `<home>\state\incidents` | Two state roots, from a layout change on 2026-09-27. Point the config's `state` (or `incidents`) key at where your packages really are; the installer preserves both keys rather than overwriting them. |
+| Incident packages are in `<harness>\state\incidents` but the config says `<home>\state\incidents` | Two state roots. The config's `state` and `incidents` keys decide where packages go; point them at where your packages really are. The installer now keeps any configured value (and `incidents` follows `state` by default) instead of re-deriving either from `<home>`. |
 
 Start from the two read-only commands in `repair/HOST-DOWN-README.md`; it is the same guidance a human
 gets when every automatic rung has failed, and it never deletes anything.

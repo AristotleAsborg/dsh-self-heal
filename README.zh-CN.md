@@ -246,16 +246,17 @@ boot-probe.log  console-tail.txt  dump-config.txt  gate.txt
 ladder.md  ladder-live.log  repair-live-1.log  repair-task.txt  summary.md
 ```
 
-`gate.txt`、`console-tail.txt`、`dump-config.txt` 基本总在；`ladder.md` 只有跑过阶梯才有。
-`repair-report.md` **常常不在包里**——修复会话的工作区是 `$DSH_HOME`，报告通常落在
-`$DSH_HOME\repair-<事故>\` 下，看护只是尽力回拷一份。这就是"报告缺失只记警告、不算失败"的原因：
+`gate.txt`、`console-tail.txt`、`dump-config.txt` 基本总在；`ladder.md` 只有跑过阶梯才有
+（只做过 L0 修复的事故包这两样都没有）。修复会话按契约把报告写到 `$DSH_HOME`，因为事故目录
+在它的工作区之外，所以看护会**同时**找 `$DSH_HOME\repair-<事故>.md` 和
+`$DSH_HOME\repair-report.md`，找到哪个就回拷进包里。报告缺失只记警告、不算失败：
 判定依据是启动探针。
 
 **阶梯的判定是一张小表**，`REPAIRED` 由**启动探针**那一列决定，而不是报告列——两列不一致是正常的：
 
 ```
-| 级                        | 进程 | 报告                | 启动探针              | 判定     |
-| L1 headless + 修复 overlay | ok   | NEEDS-HUMAN(无报告) | ALIVE（已 announce URL） | REPAIRED |
+| 级                        | 进程 | 报告                     | 启动探针                 | 判定     |
+| L1 headless + 修复 overlay | ok   | D:\dsh\home\repair-….md | ALIVE（已 announce URL） | REPAIRED |
 ```
 
 ## 排查
@@ -268,10 +269,10 @@ ladder.md  ladder-live.log  repair-live-1.log  repair-task.txt  summary.md
 | `组合失败：…` | 组合这棵树本身就失败了——下一次启动会撞上同一件事。闸门会拒绝并打印绕过方式。**先读完整报错原文**，不要默认是闸门自己的问题。 |
 | 宿主启动后一秒内退出 | 打开最新事故包里的 `console-tail.txt`，**逐字引用报错再下结论**。装载器里一个条目失败即致命，所以真正的起因通常就是它最后点名的那一行。 |
 | `incident-repair: 没有事故目录（…）` | 没有可修的事故。退出码 2，什么都没尝试。不是错误。 |
-| 阶梯跑过，但包里没有 `repair-report.md` | 正常，且只记警告。判定依据是 `boot-probe.log` 里的启动探针；见上面的包结构。 |
+| 阶梯跑过，但包里没有 `repair-report.md` | 只记警告。判定依据是 `boot-probe.log` 里的启动探针；会话把报告写在 `$DSH_HOME`，所以也去那里找 `repair-<事故>.md`——看护找到就会回拷进包里。 |
 | 崩溃后启动窗口瞬间关闭 | 设了 `DSH_NO_PAUSE=1` 就会这样（设计如此）。去掉它，窗口会留住，闸门输出就能在原地看。 |
 | 控制台里中文"像印了两遍" | 控制台代码页（CP936）造成的显示问题，**不是文件坏了**。启动器里已经有 `chcp 65001`；你自己直接调脚本时也先跑一次它。磁盘上是 UTF-8。 |
-| 事故包在 `<harness>\state\incidents`，而配置写的是 `<home>\state\incidents` | 2026-09-27 的布局变更留下了两个 state 根。把配置里的 `state`（或 `incidents`）指向你事故包真实所在；安装器**保留**这两个键，不会覆盖。 |
+| 事故包在 `<harness>\state\incidents`，而配置写的是 `<home>\state\incidents` | 两个 state 根。包落到哪里由配置的 `state` 与 `incidents` 两个键决定，把它们指向你事故包真实所在即可。安装器现在**保留**你配置的值（`incidents` 默认跟随 `state`），不再从 `<home>` 重新推导。 |
 
 先跑 `repair/HOST-DOWN-README.md` 里那两条只读命令——那就是自动四级全败之后给人看的同一份指引，
 而且它不删任何东西。

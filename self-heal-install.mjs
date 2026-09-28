@@ -234,15 +234,26 @@ function writeConfig() {
   const PROFILE = opt('--profile', previous.profile ?? 'web')
   const PORT = Number(opt('--port', String(previous.port ?? 3080)))
   const PROBE_PORT = Number(opt('--probe-port', String(previous.probePort ?? PORT + 1)))
+  // `state` / `incidents` / `log` follow the SAME rule as profile/port: they are exactly the kind of
+  // thing a deployment moves, and guessing wrong is silent. They used to be re-derived from HOME on
+  // every run, which quietly broke a deployment whose incidents live outside $DSH_HOME — measured
+  // 2026-09-27: a machine keeping 13 incident packages in <harness>\state got a config naming
+  // <home>\state\incidents, so its next crash landed in a different root from every previous one, and
+  // the two never rejoined. NOTE the old shape was worse than a plain override: `state` was in the
+  // preserved set while `incidents` was owned, so the two keys could disagree with each other.
+  const STATE_ROOT = opt('--state', previous.state ?? `${HOME}\\state`)
   const config = {
     node: NODE, bin: `${HARNESS}\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js`,
     home: HOME, profile: PROFILE, port: PORT, probePort: PROBE_PORT,
-    log: `${HARNESS}\\dsh-console.log`, incidents: `${HOME}\\state\\incidents`,
+    state: STATE_ROOT,
+    log: opt('--log', previous.log ?? `${HARNESS}\\dsh-console.log`),
+    // Kept in step with `state`, so the default still follows it; an explicit value wins.
+    incidents: opt('--incidents', previous.incidents ?? `${STATE_ROOT}\\incidents`),
     promptFile: `${HARNESS}\\config\\repair\\repair-prompt.md`,
     overlay: `${HARNESS}\\config\\repair\\repair-overlay.yml`,
     launcher: LAUNCHER,
   }
-  if (dryRun) { say(`[dry-run] 将写 ${CONFIG}（profile=${PROFILE} port=${PORT} probePort=${PROBE_PORT}）`); return }
+  if (dryRun) { say(`[dry-run] 将写 ${CONFIG}（profile=${PROFILE} port=${PORT} probePort=${PROBE_PORT} state=${STATE_ROOT}）`); return }
   // MERGE, do not clobber. This file is explicitly documented as the one place a deployment
   // records where things live, and self-heal.config.mjs reads keys beyond this list (state,
   // attempts, gate, supervisor, ladder, guide, fixed, and the timeouts). Replacing the whole
