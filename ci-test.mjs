@@ -459,7 +459,8 @@ try {
   check('the gate passes row.config straight through', /const config = row\.config/u.test(gateText), 'the gate still rebuilds config by hand')
   check('the parser module is shipped by the installer', existsSync(join(HARNESS, 'config', 'gate-parse.mjs')))
 
-  section('13. a typo in an argument fails loudly instead of disabling a guard')  // Both bugs below were real and both were SILENT or unreadable rather than merely wrong:
+  section('13. a typo in an argument fails loudly instead of disabling a guard')
+  // Both bugs below were real and both were SILENT or unreadable rather than merely wrong:
   //   * `start-gate.mjs --patch` with no value pushed `undefined`, the CLI stringified it into a path
   //     named "undefined", and the operator got a raw stack trace out of loadOverlayPatches instead of a
   //     usage error — from the one component whose job is checking arguments.
@@ -510,6 +511,74 @@ try {
     const text = readFileSync(join(HERE, f), 'utf8')
     check(`${f} states v${version}`, text.includes(`**v${version}**`), `no "**v${version}**" in ${f}`)
     check(`${f} references VERSION`, text.includes('[`VERSION`](VERSION)') || text.includes('VERSION](VERSION)'))
+  }
+  section('15. the last-resort guide survives a vanished incident entry')
+  // `newest()` listed directories and then statSync'd each one unguarded, so an entry that disappeared
+  // between those two calls threw ENOENT straight out of the script. Reproduced 2026-09-29 by removing a
+  // directory between the calls. This matters more than an ordinary crash because THIS script is the last
+  // resort: it is what a human reads after all four automated levels failed, so a crash here means no
+  // guide at all. A vanished entry must be skipped, not fatal.
+  {
+    const raceInc = join(root, 's15', 'incidents')
+    mkdirSync(join(raceInc, 'a-exit1'), { recursive: true })
+    mkdirSync(join(raceInc, 'b-exit1'), { recursive: true })
+    // The race is driven on cue by DSH_SELFHEAL_TEST_VANISH, which removes a named entry between
+    // readdirSync and statSync — the only way to exercise this guard deterministically, since directories
+    // this test creates never vanish on their own. Without it the guard cannot be tested at all, and an
+    // untested guard on the last-resort path is a check that looks present and does nothing.
+    const guideOut = join(root, 's15', 'out-guide.md')
+    const w = (() => {
+      try {
+        return { code: 0, out: execFileSync(NODE, [join(HARNESS, 'config', 'write-host-down-readme.mjs')], {
+          encoding: 'utf8',
+          env: { ...process.env, DSH_SELFHEAL_HARNESS: HARNESS, DSH_SELFHEAL_HOME: HOME, DSH_SELFHEAL_INCIDENTS: raceInc, DSH_SELFHEAL_FIXED: guideOut, DSH_SELFHEAL_STATE: join(root, 's15'), DSH_SELFHEAL_TEST_VANISH: 'b-exit1' },
+        }) }
+      } catch (error) { return { code: error.status ?? -1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` } }
+    })()
+    check('guide writer survives an entry vanishing mid-scan', w.code === 0, `exit=${w.code} ${w.out.slice(0, 140)}`)
+    check('it still wrote the guide', existsSync(guideOut), guideOut)
+    check('no unguarded-stat stack trace', !/ENOENT|at .*\.mjs:/u.test(w.out), w.out.slice(0, 160))
+    check('the written guide has no unrendered tokens', existsSync(guideOut) && !/\{\{[A-Z_]+\}\}/u.test(readFileSync(guideOut, 'utf8')))
+    check('it fell back to the next-newest incident', existsSync(guideOut) && readFileSync(guideOut, 'utf8').includes('a-exit1'))
+    // And the empty/nonexistent case must still write a guide rather than throwing.
+    const none = join(root, 's15', 'nope')
+    const w2 = (() => {
+      try {
+        return { code: 0, out: execFileSync(NODE, [join(HARNESS, 'config', 'write-host-down-readme.mjs')], {
+          encoding: 'utf8',
+          env: { ...process.env, DSH_SELFHEAL_HARNESS: HARNESS, DSH_SELFHEAL_HOME: HOME, DSH_SELFHEAL_INCIDENTS: none, DSH_SELFHEAL_FIXED: join(root, 's15', 'out2.md'), DSH_SELFHEAL_STATE: join(root, 's15') },
+        }) }
+      } catch (error) { return { code: error.status ?? -1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` } }
+    })()
+    check('guide writer exits 0 when the incidents root does not exist', w2.code === 0, `exit=${w2.code}`)
+    check('it writes a guide even with no incident', existsSync(join(root, 's15', 'out2.md')), w2.out.slice(0, 160))
+  }
+
+  section('16. the dump reader agrees with the real YAML parser on shapes beyond the fixtures')
+  // The reader has been wrong four times in ways a comfortable fixture could not express, so assert the
+  // awkward-but-legal shapes directly rather than trusting that the sample dump happened to contain them.
+  {
+    const { parseRows: parse } = await import(new URL('./gate-parse.mjs', import.meta.url).href)
+    const rowOf = (body) => ['- id: row1', "  name: 'pkg'", '  config:', ...body].join('\n')
+    const shapes = [
+      ['empty array', ['    list: []'], { list: [] }],
+      ['empty map', ['    obj: {}'], { obj: {} }],
+      ['4-level nesting', ['    a:', '      b:', '        c:', '          d: 1'], { a: { b: { c: { d: 1 } } } }],
+      ['nested arrays', ['    m: [[1, 2], [3, 4]]'], { m: [[1, 2], [3, 4]] }],
+      ['seq of maps x2', ['    m:', '      - id: a', '        n: 1', '      - id: b', '        n: 2'], { m: [{ id: 'a', n: 1 }, { id: 'b', n: 2 }] }],
+      ['seq then sibling', ['    m:', '      - a', '    after: 1'], { m: ['a'], after: 1 }],
+      ['literal block', ['    p: |', '      l1', '      l2'], { p: 'l1\nl2\n' }],
+      ['nested folded block', ['    o:', '      p: >-', '        a', '        b'], { o: { p: 'a b' } }],
+      ['block scalar then sibling', ['    p: |', '      l1', '    q: 2'], { p: 'l1\n', q: 2 }],
+      ['js expr with a colon', ["    e: !!js a ? 'x' : 'y'"], { e: "a ? 'x' : 'y'" }],
+      ['quoted numeric string', ["    s: '007'"], { s: '007' }],
+      ['bool/null/tilde', ['    t: true', '    n: null', '    z: ~'], { t: true, n: null, z: null }],
+    ]
+    for (const [label, body, want] of shapes) {
+      let got
+      try { got = parse(rowOf(body))[0]?.config ?? {} } catch (error) { got = `THREW ${error.message}` }
+      check(`reader: ${label}`, JSON.stringify(got) === JSON.stringify(want), `got=${JSON.stringify(got).slice(0, 90)}`)
+    }
   }
 } finally {
   if (process.env.SELFHEAL_CI_KEEP !== '1') rmSync(root, { recursive: true, force: true })

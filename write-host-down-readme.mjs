@@ -21,7 +21,7 @@
  * Exit:  0 = written, 2 = the guide source is missing (nothing else can be done here).
  */
 import * as CFG from './self-heal.config.mjs'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 
 const GUIDE = CFG.GUIDE
 const FIXED = CFG.FIXED
@@ -82,7 +82,21 @@ const newest = () => {
   if (!existsSync(INCIDENTS)) return undefined
   const dirs = readdirSync(INCIDENTS, { withFileTypes: true })
     .filter((e) => e.isDirectory())
-    .map((e) => ({ name: e.name, at: statSync(`${INCIDENTS}\\${e.name}`).mtimeMs }))
+    // statSync guarded: an entry can vanish between readdirSync and statSync (another process cleaning
+    // up, or the operator deleting a package while the ladder runs), and an unguarded stat threw ENOENT
+    // straight out of this script. Reproduced 2026-09-29 by removing a directory between the two calls.
+    // THIS script is the last resort — it is what a human reads after four automated levels failed — so a
+    // crash here means the operator gets no guide at all. Skipping a vanished entry is always better than
+    // that, and the next-newest package is still a useful thing to point at.
+    .flatMap((e) => {
+      // TEST HOOK: `DSH_SELFHEAL_TEST_VANISH=<name>` removes that entry between readdirSync and statSync.
+      // Without a way to make an entry vanish on cue, the guard below cannot be tested at all — a test
+      // that only creates directories can never exercise the race, and an untested guard on the
+      // LAST-RESORT path is exactly the kind of check that looks present and does nothing.
+      if (process.env.DSH_SELFHEAL_TEST_VANISH === e.name) {
+        try { rmSync(`${INCIDENTS}\\${e.name}`, { recursive: true, force: true }) } catch { /* best effort */ }
+      }
+      try { return [{ name: e.name, at: statSync(`${INCIDENTS}\\${e.name}`).mtimeMs }] } catch { return [] }    })
     .sort((a, b) => b.at - a.at)
   return dirs.length === 0 ? undefined : `${INCIDENTS}\\${dirs[0].name}`
 }
