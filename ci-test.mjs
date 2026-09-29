@@ -458,6 +458,59 @@ try {
   check('the gate does not keep a second inlined copy', !/function parseRows/u.test(gateText), 'an inlined parseRows still exists alongside the module')
   check('the gate passes row.config straight through', /const config = row\.config/u.test(gateText), 'the gate still rebuilds config by hand')
   check('the parser module is shipped by the installer', existsSync(join(HARNESS, 'config', 'gate-parse.mjs')))
+
+  section('13. a typo in an argument fails loudly instead of disabling a guard')  // Both bugs below were real and both were SILENT or unreadable rather than merely wrong:
+  //   * `start-gate.mjs --patch` with no value pushed `undefined`, the CLI stringified it into a path
+  //     named "undefined", and the operator got a raw stack trace out of loadOverlayPatches instead of a
+  //     usage error — from the one component whose job is checking arguments.
+  //   * `--timeout-mins abc` became NaN, and `setTimeout(fn, NaN * 60000)` makes Node print
+  //     "NaN is not a number. Timeout duration was set to 1", so the rung was killed after ~1 ms and the
+  //     ladder reported "not repaired" for a reason unrelated to the host. A safety bound a typo can
+  //     delete is worse than no bound, because the run still looks like it happened.
+  const gate = join(HARNESS, 'config', 'start-gate.mjs')
+  const repair = join(HARNESS, 'config', 'incident-repair.mjs')
+  const sup = join(HARNESS, 'config', 'host-supervisor.mjs')
+  const runScript = (script, args) => {
+    try {
+      return { code: 0, out: execFileSync(NODE, [script, ...args], { encoding: 'utf8', env: { ...process.env, DSH_SELFHEAL_HARNESS: HARNESS, DSH_SELFHEAL_HOME: HOME, DSH_SELFHEAL_STATE: join(root, 's13'), DSH_SELFHEAL_INCIDENTS: join(root, 's13', 'incidents') } }) }
+    } catch (error) { return { code: error.status ?? -1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` } }
+  }
+
+  const noValue = runScript(gate, ['--patch'])
+  check('gate: --patch with no value exits 2 (usage), not a crash', noValue.code === 2, `exit=${noValue.code}`)
+  check('gate: it says what --patch needs', /--patch needs an overlay path/u.test(noValue.out), noValue.out.slice(0, 200))
+  check('gate: no raw stack trace leaks', !/^\s+at .*\.mjs:/mu.test(noValue.out), noValue.out.slice(0, 200))
+  const flagAsValue = runScript(gate, ['--patch', '--quiet'])
+  check('gate: --patch --quiet is treated as a missing value', flagAsValue.code === 2, `exit=${flagAsValue.code}`)
+  check('gate: an unknown argument still exits 2', runScript(gate, ['--bogus']).code === 2)
+
+  for (const bad of ['abc', '0', '-5']) {
+    const r = runScript(repair, ['--ladder', '--incident', join(root, 's13', 'incidents', 'none'), '--timeout-mins', bad, '--dry-run'])
+    check(`ladder: --timeout-mins ${bad} exits 2 with a message`, r.code === 2 && /timeout-mins needs a number/u.test(r.out), `exit=${r.code} ${r.out.slice(0, 120)}`)
+  }
+  // A valid value must not be rejected by the VALIDATOR. Asserting on the exit code alone would be
+  // wrong here: this incident path does not exist, so the script legitimately exits 2 for THAT reason.
+  // Assert the absence of the validation message instead, which is the thing under test.
+  const goodTimeout = runScript(repair, ['--incident', join(root, 's13', 'incidents', 'none'), '--timeout-mins', '10', '--dry-run'])
+  check('ladder: a valid --timeout-mins is not rejected by the validator', !/timeout-mins needs a number/u.test(goodTimeout.out), goodTimeout.out.slice(0, 160))
+
+  const badExit = runScript(sup, ['--exit-code', 'abc'])
+  check('supervisor: a non-numeric --exit-code exits 2', badExit.code === 2, `exit=${badExit.code}`)
+  check('supervisor: it never invents an exit code', !/exitNaN/u.test(badExit.out), badExit.out.slice(0, 160))
+  check('supervisor: a numeric --exit-code is still accepted', runScript(sup, ['--exit-code', '1']).code === 0)
+  section('14. the version is written once and the READMEs agree with it')
+  // `VERSION` is the single source of truth, so the badges in two READMEs are the only places it is
+  // repeated — and repeated strings drift. A release that bumps one and not the other is worse than no
+  // version at all, because the number is then actively misleading.
+  const versionFile = join(HERE, 'VERSION')
+  check('VERSION exists at the kit root', existsSync(versionFile), versionFile)
+  const version = existsSync(versionFile) ? readFileSync(versionFile, 'utf8').trim() : ''
+  check('VERSION is a plain semantic version', /^\d+\.\d+\.\d+$/u.test(version), JSON.stringify(version))
+  for (const f of ['README.md', 'README.zh-CN.md']) {
+    const text = readFileSync(join(HERE, f), 'utf8')
+    check(`${f} states v${version}`, text.includes(`**v${version}**`), `no "**v${version}**" in ${f}`)
+    check(`${f} references VERSION`, text.includes('[`VERSION`](VERSION)') || text.includes('VERSION](VERSION)'))
+  }
 } finally {
   if (process.env.SELFHEAL_CI_KEEP !== '1') rmSync(root, { recursive: true, force: true })
   else console.log(`\n(kept for inspection: ${root})`)

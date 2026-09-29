@@ -61,7 +61,21 @@ const opt = (name, fallback) => {
   const i = argv.indexOf(name)
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fallback
 }
-const exitCode = Number(opt('--exit-code', '1'))
+/**
+ * Read the host exit code, refusing a value that is not a number.
+ *
+ * WHY: `Number('abc')` is NaN, and the exit code is not decorative — it names the incident directory at
+ * `${INCIDENTS}\${stamp}-exit${exitCode}`. A mistyped value therefore produced a package called
+ * `...-exitNaN` and recorded "exit=NaN" in the summary and in supervisor.log, which is a record that
+ * cannot be reconciled with anything afterwards. Refuse loudly instead: this script's own contract is
+ * that exit codes are evidence, so it must not invent one.
+ */
+const exitCodeRaw = opt('--exit-code', '1')
+const exitCode = Number(exitCodeRaw)
+if (!Number.isInteger(exitCode)) {
+  console.error(`supervisor: --exit-code needs an integer, got ${JSON.stringify(exitCodeRaw)}`)
+  process.exit(2)
+}
 const wantRepair = argv.includes('--repair')
 const quiet = argv.includes('--no-print')
 const say = (s) => { if (!quiet) console.log(s) }

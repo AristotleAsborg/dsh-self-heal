@@ -45,7 +45,21 @@ const argv = process.argv.slice(2)
 const extraPatches = []
 let quiet = false
 for (let i = 0; i < argv.length; i += 1) {
-  if (argv[i] === '--patch') { extraPatches.push(argv[i + 1]); i += 1 } else if (argv[i] === '--quiet') quiet = true
+  if (argv[i] === '--patch') {
+    const value = argv[i + 1]
+    // A missing value used to be pushed as `undefined`, which the CLI stringified into the literal path
+    // "D:\dsh\config\undefined" and then threw a raw stack trace out of loadOverlayPatches. This file
+    // documents `2 = usage error` for exactly that case, and a gate that dies with an unhandled throw
+    // looks like a gate that is broken rather than a command that was mistyped. Treat a following flag as
+    // a missing value too, so `--patch --quiet` reports usage instead of inventing a path named --quiet.
+    if (value === undefined || value.startsWith('--')) {
+      console.error('start-gate: --patch needs an overlay path')
+      console.error('usage: node start-gate.mjs [--patch <extra-overlay.yml>]... [--quiet]')
+      process.exit(2)
+    }
+    extraPatches.push(value)
+    i += 1
+  } else if (argv[i] === '--quiet') quiet = true
   else { console.error(`start-gate: unknown argument ${argv[i]}`); process.exit(2) }
 }
 

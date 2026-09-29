@@ -1,10 +1,14 @@
 # dsh-self-heal
 
-[![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
+**v0.1.0** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
 
 English | [中文](README.zh-CN.md)
 
 Startup gate, crash supervisor and a bounded repair ladder for a DeepSeek Harness installation. Windows, Node 20+.
+
+The version lives in [`VERSION`](VERSION) and is the only place it is written down; a release is that
+file plus a matching `git tag v<version>`. There is no build step and no package manifest, so nothing
+else has to stay in step with it.
 
 **It starts on its own — you do not invoke anything.** Once installed, the whole chain is wired into your
 existing launcher, and it runs whether or not anyone is watching:

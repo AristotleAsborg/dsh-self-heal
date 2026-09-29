@@ -53,10 +53,29 @@ const opt = (name, fallback) => {
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : fallback
 }
 const flag = (name) => argv.includes(name)
+/**
+ * Read a numeric option, refusing anything that is not a usable number.
+ *
+ * WHY THIS EXISTS: `Number('abc')` is NaN, and NaN does not disable a guard politely — it disables it
+ * INVISIBLY. `setTimeout(fn, NaN * 60000)` makes Node print `TimeoutNaNWarning: NaN is not a number.
+ * Timeout duration was set to 1`, so a mistyped `--timeout-mins` killed each rung after about 1 ms and
+ * the ladder reported "not repaired" for a reason that had nothing to do with the host. A safety bound
+ * that a typo can delete is worse than no bound, because the run still looks like it happened.
+ */
+const numOpt = (name, fallback, { min = 0, integer = false } = {}) => {
+  const raw = opt(name, String(fallback))
+  const value = Number(raw)
+  const bad = !Number.isFinite(value) || value < min || (integer && !Number.isInteger(value))
+  if (bad) {
+    console.error(`repair: ${name} needs ${integer ? 'an integer' : 'a number'} >= ${min}, got ${JSON.stringify(raw)}`)
+    process.exit(2)
+  }
+  return value
+}
 const dryRun = flag('--dry-run')
 const ladder = !flag('--no-ladder')
 const promptFile = opt('--prompt', PROMPT_FILE)
-const timeoutMins = Number(opt('--timeout-mins', '10'))
+const timeoutMins = numOpt('--timeout-mins', 10, { min: 1 })
 
 const newestIncident = () => {
   // Guarded: this used to let readdirSync throw ENOENT when the incidents root did not exist

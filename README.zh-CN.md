@@ -1,10 +1,13 @@
 # dsh-self-heal
 
-[![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
+**v0.1.0** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
 
 [English](README.md) | 中文
 
 给 DeepSeek Harness 用的启动闸门、崩溃看护与有界修复阶梯。Windows，Node 20+。
+
+版本写在 [`VERSION`](VERSION) 里，那是它**唯一**的落笔处；一次发布 = 该文件 + 一个对应的
+`git tag v<version>`。本项目没有构建步骤、也没有包清单，所以没有别的东西需要跟它对齐。
 
 **它会自己启动——你不需要调用任何东西。** 装好之后，整条链路接在你**原有的启动器**上，无人在场也照跑：
 
