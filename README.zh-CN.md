@@ -1,6 +1,6 @@
 # dsh-self-heal
 
-**v0.1.1** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
+**v0.1.2** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
 
 [English](README.md) | 中文
 
@@ -93,7 +93,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 | 阶段 | 文件 | 行为 |
 | --- | --- | --- |
 | L0-1 启动闸门 | `start-gate.mjs` | 启动前组合 profile 树，只在**确证**不一致时拒绝启动：安装副本不接受某个配置键，或安装副本与源码漂移。内部错误一律放行——闸门文件缺失或自身出错只告警。判定追加到 `$DSH_HOME\state\gate.log`，该日志可写时也追加到宿主日志。 |
-| L0 崩溃看护 | `host-supervisor.mjs` | **宿主非零退出时自动运行。** 写事故包（日志尾部、闸门结论、组合树），只按**最后一次**启动尝试分类，并执行唯一在允许清单内的修复：重同步安装副本（`pnpm install`）后复验闸门。它不改启动器退出码，默认也不重启。摘要在任何长任务之前先落盘，所以被杀的运行也留得下。 |
+| L0 崩溃看护 | `host-supervisor.mjs` | **宿主非零退出时自动运行。** 写事故包（日志尾部、闸门结论、组合树），只按**最后一次**启动尝试分类，并执行唯一在允许清单内的修复：重同步安装副本（`pnpm install`）后复验闸门。它不改启动器退出码。修复**被证实**后它会重启一次（每 10 分钟最多一次；用 `DSH_NO_RELAUNCH=1` 关掉）。摘要在任何长任务之前先落盘，所以被杀的运行也留得下。 |
 | L1 / L1.5 修复阶梯 | `incident-repair.mjs` | **在看护之后自动启动**，把事故交给一次有界的 headless 会话：先 `--profile headless`，起不来再降级到出厂 `rescue` profile，策略由 `repair/repair-overlay.yml` 给定。每一级都以 detached 方式运行、输出写进事故目录，所以关掉窗口既不会中断也不会抹掉它；控制台只是 tail 那个文件看进度。 |
 | 判定 | `incident-repair.mjs` | 某级算"修好"的唯一依据是**启动探针**：把组合在备用端口 3081 上真启动一次并撑过硬超时。退出码不算证据；代理没写报告只记警告，不否决。 |
 | 兜底 | `write-host-down-readme.mjs` | 所有级都没修好时，把 `repair/HOST-DOWN-README.md` 复制到启动器旁的固定位置，并追加本次事故的事实。 |

@@ -1,6 +1,6 @@
 # dsh-self-heal
 
-**v0.1.1** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
+**v0.1.2** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
 
 English | [中文](README.zh-CN.md)
 
@@ -108,7 +108,7 @@ machine, so there was nothing to run it against.
 | Stage | File | Behaviour |
 | --- | --- | --- |
 | L0-1 gate | `start-gate.mjs` | Composes the profile tree before launch and refuses to start on a **confirmed** inconsistency: a config key the installed module rejects, or an installed copy that has drifted from its source. Fails open — a missing gate file or an internal error only warns. Verdict appended to `$DSH_HOME\state\gate.log`, and to the host log when that file is writable. |
-| L0 supervisor | `host-supervisor.mjs` | **Runs automatically on a non-zero host exit.** Writes an incident bundle (log tail, gate verdict, composed tree), classifies the failure against the **last** launch attempt, and performs the one allow-listed repair: re-sync the installed bundles (`pnpm install`), then re-check the gate. Never changes the launcher's exit code, never relaunches by default. A summary is written before any long-running step, so a killed run still leaves one. |
+| L0 supervisor | `host-supervisor.mjs` | **Runs automatically on a non-zero host exit.** Writes an incident bundle (log tail, gate verdict, composed tree), classifies the failure against the **last** launch attempt, and performs the one allow-listed repair: re-sync the installed bundles (`pnpm install`), then re-check the gate. Never changes the launcher's exit code. After a **verified** repair it relaunches once (bounded to one per 10 minutes; opt out with `DSH_NO_RELAUNCH=1`). A summary is written before any long-running step, so a killed run still leaves one. |
 | L1 / L1.5 repair | `incident-repair.mjs` | **Starts automatically after the supervisor**, and hands the incident to a bounded headless session — first `--profile headless`, then the factory `rescue` profile — under `repair/repair-overlay.yml`. Each rung runs detached with its output in the incident directory, so closing the window neither stops nor erases it; the console tails that file for live progress. |
 | Verdict | `incident-repair.mjs` | A rung counts as repaired when a real **boot probe** of the composition survives (scratch port 3081, hard timeout). Exit codes are not evidence, and a missing agent report is a warning rather than a veto. |
 | Fallback | `write-host-down-readme.mjs` | When no rung repairs it, copies `repair/HOST-DOWN-README.md` to a fixed path next to the launcher and appends the incident facts. |
