@@ -1,6 +1,6 @@
 # dsh-self-heal
 
-**v0.1.5** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
+**v0.1.6** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
 
 [English](README.md) | 中文
 
@@ -28,21 +28,35 @@
 
 | 对象 | 状态 |
 | --- | --- |
-| `dsh` CLI `0.1.6-alpha.2` | 本套件开发与实测所用的版本 |
+| `dsh` CLI `0.1.6-alpha.2` | 本套件开发所用的版本 |
 | `dsh` CLI `0.1.7-rc.2` | **兼容** —— 通过对比两个发布版验得，见下 |
+| `dsh` CLI `0.2.0-rc.2` | **兼容**，而且这一版是**端到端验过**的。**从 0.1.x 升级上来必须先做下面那项检查。** |
 | **官方桌面端（Electron）** | **不支持。** 它有自己的启动器与生命周期，且 CLI 明确拒绝它的 profile，见下 |
 
 它只用到这么点东西，所以版本变更很少能碰到它：
 
 - **只有六个 CLI 入口**：`--profile`、`--patch`、`--dump-config`、`--from-default-profile`、
   `--help`、`--version`。套件**从不 import** DSH 的内部模块，所以内部怎么动都不影响它。
-- **`--dump-config` 的 YAML**（闸门手写解析的那份）。这是唯一真正的耦合，所以直接对比过：
-  `@deepseek-ai/dsh-app-boot` 里的 `renderConfigDump`、`groupedDump` 与 `!!js` schema 类型在两个
-  版本间**逐字节相同**。dump 格式没有变。
+  这六个在 0.2.0 上都在、且未变。
+- **`--dump-config` 的 YAML**（闸门手写解析的那份）。这是唯一真正的耦合，**也确实是唯一坏过的东西**：
+  0.2.0 把 dump 从 667 行涨到 1359 行，并引入了一种 0.1.x 从不产生的形状，本套件的解析器读错了。
+  现已修好；在 **0.1.6 与 0.2.0 两代各自的 dump** 上，它都与真实 `yaml` 包**逐行一致**——上面两行
+  "兼容"就是据此得出的。请把 dump 当成会动的那一环：**每次升级 `dsh` 之后，重跑下面这项检查。**
 - **你的 profile 结构**：带 `dsh.profile.bundles` 的 `package.json`，加上 `cordis.patch.yml` 层，
-  按这个顺序。两个版本之间未变。
+  按这个顺序。目前未变。
 - **你的本地插件**：它们**没有声明任何 DSH peer 范围**，所以 0.1.7 新增的"插件/运行时兼容门禁"
   对它们不生效——那道门禁只检查**确实声明了** `peerDependencies` 的清单。
+
+解析器是**手写的**，而它解析的格式**并没有契约把它冻结**，所以让上面几行保持诚实的检查只能手工做
+——它需要一个真实的 DSH 安装来对比：
+
+```powershell
+# 先导出组合树，再拿真实 yaml 包对比解析器
+dsh --profile web --dump-config > dump.txt
+node diff-parse.mjs dump.txt --cli "<dsh>/lib/bin.js"
+```
+
+它要么打印 `AGREEMENT`，要么打印逐行差异；`yaml` 解析不到时打印 `SKIP`。
 
 ### 桌面端是另一个入口，不是另一个版本
 
@@ -84,8 +98,10 @@ error: profile "desktop" is managed exclusively by the Electron application
 跑桌面端的话，请把本套件对着你的 **CLI 安装**（`dsh` / `dsh web`）单独用。两者可以共存，
 它们是**两套独立生命周期**。
 
-**覆盖边界**：上面的 CLI 兼容结论来自两个发布版的**契约、发射器与守卫的直接对比**（从 tarball 里读出来的），
-**不是**把套件在 0.1.7 上端到端跑过一遍。桌面端那些事实来自官方仓库 `apps/desktop` 的文档与清单，
+**覆盖边界**：`0.1.7-rc.2` 那一行是两个发布版的**契约、发射器与守卫的直接对比**（从 tarball 里读出来的），
+**不是**端到端跑过。`0.2.0-rc.2` 那一行更强：闸门跑过、宿主启动过、解析器在该版本**自己的 dump** 上
+与真实 `yaml` 包对比过。`0.1.6-alpha.2` 那一行是本套件所在的这台机器。**没有任何一行**是在
+`0.1.7-rc.2` 上端到端跑出来的。桌面端那些事实来自官方仓库 `apps/desktop` 的文档与清单，
 但**本套件从未在桌面端上运行过**——本机没有安装任何桌面端构建，没有可运行的对象。
 
 ## 它能做什么

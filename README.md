@@ -1,6 +1,6 @@
 # dsh-self-heal
 
-**v0.1.5** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
+**v0.1.6** · [![CI](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml/badge.svg)](https://github.com/AristotleAsborg/dsh-self-heal/actions/workflows/ci.yml)
 
 English | [中文](README.zh-CN.md)
 
@@ -33,23 +33,38 @@ assumed.
 
 | Against | Status |
 | --- | --- |
-| `dsh` CLI `0.1.6-alpha.2` | The version this kit was developed and measured on. |
+| `dsh` CLI `0.1.6-alpha.2` | The version this kit was developed on. |
 | `dsh` CLI `0.1.7-rc.2` | **Compatible** — checked by comparing the two releases, see below. |
+| `dsh` CLI `0.2.0-rc.2` | **Compatible**, and this one was checked end to end. **Upgrading from 0.1.x requires the check below.** |
 | **The official desktop (Electron) app** | **Not supported.** It has its own launcher and lifecycle, and the CLI explicitly refuses its profile. Details below. |
 
 What the kit uses, and why version changes rarely reach it:
 
 - **Six CLI affordances only**: `--profile`, `--patch`, `--dump-config`, `--from-default-profile`,
   `--help`, `--version`. The kit never imports a DSH internal module, so the internals are free to move.
-- **The `--dump-config` YAML**, which the gate parses by hand. This is the one real coupling, so it was
-  compared directly: `renderConfigDump`, `groupedDump` and the `!!js` schema type in
-  `@deepseek-ai/dsh-app-boot` are **byte-identical** between those two versions. The dump format did not
-  change.
+  All six are present and unchanged in 0.2.0.
+- **The `--dump-config` YAML**, which the gate parses by hand. This is the one real coupling. It is also
+  the one thing that has actually broken: 0.2.0 grew the dump from 667 to 1359 lines and introduced a
+  shape 0.1.x never emitted, which this kit's reader misread. The reader is fixed, and it now agrees with
+  the real `yaml` package row for row on dumps from **both** 0.1.6 and 0.2.0 — which is the evidence for
+  the two "Compatible" rows above. Treat the dump as the part that moves: **after any `dsh` upgrade, re-run
+  the check below.**
 - **Your profile layout**: `package.json` with `dsh.profile.bundles`, plus `cordis.patch.yml` layers, in
-  that order. Unchanged between the two versions.
+  that order. Unchanged so far.
 - **Your local plugins**, which declare **no DSH peer ranges** — so the plugin/runtime compatibility gate
   introduced in 0.1.7 does not apply to them. That gate only evaluates a manifest that actually declares
   `peerDependencies`.
+
+The reader is a hand-written parser for a format that is not frozen by contract, so the check that keeps
+the rows above honest is a manual one — it needs a real DSH install to compare against:
+
+```powershell
+# dump the composition, then compare the reader against the real yaml package
+dsh --profile web --dump-config > dump.txt
+node diff-parse.mjs dump.txt --cli "<dsh>/lib/bin.js"
+```
+
+It prints `AGREEMENT` or the exact rows that differ, and `SKIP` when `yaml` cannot be resolved.
 
 ### The desktop app is a different entry point, not a version
 
@@ -97,11 +112,13 @@ recorded as a caveat, not as a claim that the kit manages the desktop app — it
 If you run the desktop app, run this kit against your CLI installation (`dsh`/`dsh web`) as its own thing.
 They can coexist; they are separate lifecycles.
 
-**How far this was checked**: the CLI compatibility above is a comparison of the two published releases
-(contracts, emitters and guards read out of the tarballs), **not** an end-to-end run of the kit on 0.1.7.
-The desktop facts above come from the official repository's `apps/desktop` documentation and manifest, but
-**the kit has never been run against the desktop app at all** — no desktop build was installed on this
-machine, so there was nothing to run it against.
+**How far this was checked**: the `0.1.7-rc.2` row is a comparison of published releases (contracts,
+emitters and guards read out of the tarballs), not an end-to-end run. The `0.2.0-rc.2` row is stronger:
+the gate was run, the host was booted, and the dump reader was compared against the real `yaml` package
+on that version's own dump. The `0.1.6-alpha.2` row is the machine this kit lives on. No row here is an
+end-to-end run on `0.1.7-rc.2` specifically. The desktop facts above come from the official repository's
+`apps/desktop` documentation and manifest, but **the kit has never been run against the desktop app at
+all** — no desktop build was installed on this machine, so there was nothing to run it against.
 
 ## What it does
 
