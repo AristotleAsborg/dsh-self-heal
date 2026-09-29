@@ -20,6 +20,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -665,6 +666,80 @@ export const MAX_ATTEMPTS = 1
       let got
       try { got = parse(rowOf(body))[0]?.config ?? {} } catch (error) { got = `THREW ${error.message}` }
       check(`reader: ${label}`, JSON.stringify(got) === JSON.stringify(want), `got=${JSON.stringify(got).slice(0, 90)}`)
+    }
+  }
+
+  section('18. the reader agrees with real yaml on the two shapes a DSH 0.2.0 dump exposed')
+  // Both shapes below were wrong in the reader and were found ONLY by the out-of-CI differential run
+  // against a real DSH 0.2.0-rc.2 dump — 142 green checks said nothing about either:
+  //
+  //   1. `- !!js >-` (a tag plus a block-scalar indicator on a SEQUENCE ITEM). The `!!js ` prefix matched
+  //      the `key:` pattern, so the item was read as the map { "!!js": ">-" } and the folded body was
+  //      discarded. `preset-cordis` uses exactly this for `customSkillDirs`, so the gate compared a
+  //      config value that does not exist anywhere.
+  //   2. single-quoted `''` escapes were returned verbatim, so
+  //      `disabled: !!js '!ctx.get(''profileContext'')'` read as `!ctx.get(''profileContext'')` instead of
+  //      `!ctx.get('profileContext')`.
+  //
+  // Ground truth is the real `yaml` package when it resolves; the pinned expected values are the ones it
+  // produced, so the section still means something without it.
+  {
+    let yamlParse = null
+    for (const anchor of [join(HARNESS, 'bin.js'), 'D:\\dsh\\runtime\\dsh\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js']) {
+      try { yamlParse = createRequire(anchor)('yaml').parse; break } catch { /* try the next anchor */ }
+    }
+    check('ground truth resolved (real yaml package)', yamlParse !== null, 'yaml unresolvable — pinned values are used')
+
+    const shapes = [
+      {
+        label: 'sequence item: tag + folded block',
+        yaml: "items:\n  - !!js >-\n    process.getBuiltinModule('node:path').join(a,\n    'skills')\n",
+        key: 'items',
+        expected: ["process.getBuiltinModule('node:path').join(a, 'skills')"],
+      },
+      {
+        label: 'sequence item: tag + folded block, then a sibling key',
+        yaml: 'items:\n  - !!js >-\n    line one\n    line two\nnext: 1\n',
+        key: 'items',
+        expected: ['line one line two'],
+      },
+      {
+        label: 'sequence item: tag + literal block keeps newlines',
+        yaml: 'items:\n  - !!js |-\n    line one\n    line two\n',
+        key: 'items',
+        expected: ['line one\nline two'],
+      },
+      {
+        label: 'doubled single quotes decode to one',
+        yaml: "items:\n  - !!js 'a''b'\n",
+        key: 'items',
+        expected: ["a'b"],
+      },
+      {
+        label: 'the real disabled expression',
+        yaml: "rows:\n  - id: x\n    disabled: !!js '!ctx.get(''profileContext'')'\n",
+        key: 'rows',
+        expected: [{ id: 'x', disabled: "!ctx.get('profileContext')" }],
+      },
+      {
+        // No block header here, so this guards the OTHER half of the `!!js ` handling: the tag must not be
+        // mistaken for a map key, and the expression must not be truncated at its first space. This shape
+        // was added after a sensitivity run showed the block-scalar cases could pass without that
+        // exclusion in place.
+        label: 'sequence item: tag + plain scalar (no block header)',
+        yaml: "items:\n  - !!js process.platform === 'win32'\n",
+        key: 'items',
+        expected: ["process.platform === 'win32'"],
+      },
+    ]
+
+    for (const s of shapes) {
+      if (yamlParse !== null) {
+        const truth = yamlParse(s.yaml)[s.key]
+        check(`yaml agrees with the pinned value: ${s.label}`, JSON.stringify(truth) === JSON.stringify(s.expected), `yaml gave ${JSON.stringify(truth)}`)
+      }
+      const ours = parseRows(`- id: row1\n  name: 'pkg'\n  config:\n    ${s.yaml.split('\n').join('\n    ')}`)[0]?.config?.[s.key]
+      check(`reader: ${s.label}`, JSON.stringify(ours) === JSON.stringify(s.expected), `got ${JSON.stringify(ours)}`)
     }
   }
 } finally {

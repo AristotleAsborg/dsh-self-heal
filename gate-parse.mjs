@@ -42,6 +42,37 @@ export function indentOf(line) {
  * @param raw - the text after the colon.
  * @returns the coerced value.
  */
+/**
+ * Undo YAML's quoting inside a scalar that is already known to be quoted.
+ *
+ * SINGLE quotes escape by DOUBLING (`'a''b'` is the four-character string `a'b`), which the previous
+ * version returned verbatim as `a''b`. The real consequence was not cosmetic: the dump writes
+ * `disabled: !!js '!ctx.get(''profileContext'')'`, so our reader produced
+ * `!ctx.get(''profileContext'')` where the host evaluates `!ctx.get('profileContext')`, and the gate
+ * compared a config that does not exist. Found 2026-09-29 by the differential test against a DSH
+ * 0.2.0-rc.2 dump.
+ *
+ * DOUBLE quotes use backslash escapes; the `\uXXXX` forms are handled because a config value carrying a
+ * literal control character would otherwise arrive as the four characters `\u0041`.
+ *
+ * @param body - the text between the outer quotes.
+ * @param quote - the quote character that delimited it.
+ * @returns the scalar's real value.
+ */
+function unquoteScalar(body, quote) {
+  if (quote === "'") return body.replace(/''/gu, "'")
+  return body.replace(/\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)/gu, (match, esc) => {
+    if (esc[0] === 'u' || esc[0] === 'x') return String.fromCodePoint(Number.parseInt(esc.slice(1), 16))
+    return { n: '\n', t: '\t', r: '\r', 0: '\0', '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f' }[esc] ?? esc
+  })
+}
+
+/**
+ * Turn one scalar token into a JS value. Not a YAML parser: it covers the value shapes the dump emits.
+ *
+ * @param raw - the scalar text as it appears in the dump.
+ * @returns the coerced value.
+ */
 export function coerceScalar(raw) {
   let v = String(raw).trim()
   // `!!js <expr>` marks a value the host evaluates. The gate cannot evaluate it and must not pretend
@@ -54,7 +85,7 @@ export function coerceScalar(raw) {
   if (/^-?\d+$/u.test(v)) return Number(v)
   if (/^-?\d*\.\d+$/u.test(v)) return Number(v)
   const quoted = /^(['"])(.*)\1$/u.exec(v)
-  if (quoted !== null) return quoted[2]
+  if (quoted !== null) return unquoteScalar(quoted[2], quoted[1])
   return v
 }
 
@@ -115,13 +146,31 @@ export function readBlockScalar(lines, startIndex, keyIndent) {
   // tag before deciding this IS a block scalar, so this function must accept the same shape.
   const header = /:\s*(?:!!js\s+)?([|>][+-]?\d*)\s*$/u.exec(lines[startIndex])
   if (header === null) return { text: '', next: startIndex + 1 }
-  const style = header[1]
+  return readBlockBody(lines, startIndex, keyIndent, header[1], lines.length)
+}
+
+/**
+ * Collect and fold a block scalar body whose header sits on line `headerIndex`.
+ *
+ * Split out of {@link readBlockScalar} deliberately. The sequence-item shape `- !!js >-` needs the same
+ * body rules but has no `key:` for that function's header regex to match, and writing the folding a
+ * second time produced two copies of chomping and blank-line logic that only had to drift once to
+ * reintroduce the very bug being fixed. One implementation, two entry points.
+ *
+ * @param lines - all dump lines.
+ * @param headerIndex - index of the line carrying the indicator.
+ * @param keyIndent - indentation of the line carrying the indicator.
+ * @param style - the indicator itself (`>`, `>-`, `|`, `|+`, …).
+ * @param limit - exclusive line index the body must not read past.
+ * @returns the scalar text and the index to resume scanning from.
+ */
+function readBlockBody(lines, headerIndex, keyIndent, style, limit) {
   const folded = style.startsWith('>')
   const strip = style.includes('-')
   const body = []
-  let i = startIndex + 1
+  let i = headerIndex + 1
   let bodyIndent
-  for (; i < lines.length; i += 1) {
+  for (; i < limit; i += 1) {
     const line = lines[i]
     if (line.trim() === '') { body.push(''); continue }
     if (bodyIndent === undefined) {
@@ -213,12 +262,34 @@ function readBlock(lines, startIndex, indent, end) {
         i = child.next
         continue
       }
-      if (/^[A-Za-z_][A-Za-z0-9_.-]*:(?:\s|$)/u.test(rest)) {
+      // A `!!js ` prefix here is a TAG on the item, not a key. Consume it FIRST, before the map-key test
+      // below, because "!!js " also matches that pattern: `- !!js process.platform === 'win32'` would
+      // otherwise be read as the map { "!!js": "process.platform" } — a key that does not exist and an
+      // expression truncated at its first space. The tag is dropped because the gate cannot evaluate the
+      // expression and the composed config carries its text.
+      //
+      // The tag is consumed here rather than guarded against at the map test: a guard leaves two pieces of
+      // code both deciding what a `!!js` item is, and the guard then never fires because this branch has
+      // already taken it — a sensitivity run showed exactly that, passing with the guard removed.
+      const tagged = /^!!js\s+(.*)$/u.exec(rest)
+      const item0 = tagged === null ? rest : tagged[1]
+      if (tagged !== null && isBlockHeader(item0)) {
+        // `- !!js >-` with its folded body on the following lines.
+        const r = readBlockBody(lines, i, lineIndent, item0, limit)
+        container.push(r.text)
+        i = r.next
+        continue
+      }
+      if (/^[A-Za-z_][A-Za-z0-9_.-]*:(?:\s|$)/u.test(item0)) {
+        // NOT guarded with `&& !rest.startsWith('!!js')`. Such a guard is unreachable: the tag block above
+        // consumes every `!!js ` item, so by this line `rest` can never start with `!!js `. Verified by
+        // removing the guard — 155 checks stayed green, and the whole real dump still matched yaml row for
+        // row. Unreachable guards are worse than none: they read as protection while doing nothing.
         // The item is a map; its first key sits right after "- ", and its remaining keys line up with
         // that column. Parse it directly instead of recursing on this same line.
         const itemIndent = dash + 1 + (line.slice(dash + 1).length - line.slice(dash + 1).trimStart().length)
         const item = {}
-        const kv = /^([A-Za-z_][A-Za-z0-9_.-]*):(?:\s*(.*))?$/u.exec(rest)
+        const kv = /^([A-Za-z_][A-Za-z0-9_.-]*):(?:\s*(.*))?$/u.exec(item0)
         const key = kv[1]
         let value = (kv[2] ?? '').trim()
         if (value.startsWith('!!js ')) value = value.slice(5).trim()
@@ -245,7 +316,7 @@ function readBlock(lines, startIndex, indent, end) {
         container.push(item)
         continue
       }
-      container.push(parseFlow(rest))
+      container.push(parseFlow(item0))
       i += 1
       continue
     }
