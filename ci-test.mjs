@@ -554,7 +554,94 @@ try {
     check('it writes a guide even with no incident', existsSync(join(root, 's15', 'out2.md')), w2.out.slice(0, 160))
   }
 
-  section('16. the dump reader agrees with the real YAML parser on shapes beyond the fixtures')
+  section('16. the relaunch does not block the supervisor, and its report still gets written')
+  // REGRESSION GUARD for a bug that survived a whole session of green tests and only appeared in a live
+  // run: the relaunch used `run('cmd.exe', ['/c','start','',LAUNCHER])`, and `run` is execFileSync with the
+  // DEFAULT pipe stdio. `start` returns at once, but the launcher it starts inherits those pipes, so
+  // execFileSync waited for the host it had just launched to EXIT. Measured 2026-09-29: a 4-second
+  // launcher blocked the call past 20 s, while stdio:'ignore' returned in 20 ms.
+  //
+  // The visible damage was not the delay: the supervisor never reached its own final report, so
+  // summary.md stayed the in-progress stub and supervisor.log gained no line — leaving no record that the
+  // relaunch had WORKED. The fix is a detached spawn with ignored stdio.
+  //
+  // The fixture reproduces the CONDITIONS rather than the timing: a launcher that stays alive briefly (so
+  // a pipe-inheriting call must block), and a scratch harness whose gate and CLI stubs let the relaunch
+  // branch be reached at all.
+  {
+    const t2 = join(root, 's16')
+    const h2 = join(t2, 'harness')
+    mkdirSync(join(h2, 'config'), { recursive: true })
+    const st2 = join(t2, 'state')
+    const slowLauncher = join(t2, 'launcher.cmd')
+    writeFileSync(slowLauncher, '@echo off\r\necho ran > "%~dp0launcher-ran.txt"\r\nping -n 4 127.0.0.1 >nul\r\n', 'utf8')
+    const stubLadder = join(t2, 'ladder.mjs')
+    writeFileSync(stubLadder, 'process.exit(0)\n', 'utf8')
+    writeFileSync(join(h2, 'config', 'gate.mjs'), 'process.exit(0)\n', 'utf8')
+    writeFileSync(join(h2, 'bin.js'), 'process.exit(0)\n', 'utf8')
+    writeFileSync(join(h2, 'config', 'host-supervisor.mjs'), readFileSync(join(HERE, 'host-supervisor.mjs'), 'utf8'), 'utf8')
+    writeFileSync(join(h2, 'config', 'self-heal.config.mjs'), `export const CONFIG_PATH = ''
+export const HARNESS = ${JSON.stringify(h2)}
+export const NODE = ${JSON.stringify(NODE)}
+export const BIN = ${JSON.stringify(join(h2, 'bin.js'))}
+export const HOME = ${JSON.stringify(join(h2, 'home'))}
+export const PROFILE = 'web'
+export const PORT = 3080
+export const PROBE_PORT = 3081
+export const LOG = ${JSON.stringify(join(h2, 'dsh-console.log'))}
+export const STATE = ${JSON.stringify(st2)}
+export const INCIDENTS = ${JSON.stringify(join(st2, 'incidents'))}
+export const SESSIONS = ${JSON.stringify(join(h2, 'sessions'))}
+export const ATTEMPTS = ${JSON.stringify(join(st2, 'repairs', 'attempts.json'))}
+export const HOME_PATCH = ${JSON.stringify(join(h2, 'home', 'cordis.patch.yml'))}
+export const PROFILE_PATCH = ${JSON.stringify(join(h2, 'home', 'profiles', 'web', 'cordis.patch.yml'))}
+export const GATE = ${JSON.stringify(join(h2, 'config', 'gate.mjs'))}
+export const SUPERVISOR = ${JSON.stringify(join(h2, 'config', 'host-supervisor.mjs'))}
+export const LADDER = ${JSON.stringify(stubLadder)}
+export const OVERLAY = ${JSON.stringify(join(h2, 'config', 'overlay.yml'))}
+export const PROMPT_FILE = ${JSON.stringify(join(h2, 'config', 'prompt.md'))}
+export const GUIDE_WRITER = ${JSON.stringify(join(h2, 'config', 'guide.mjs'))}
+export const GUIDE = ${JSON.stringify(join(h2, 'config', 'guide.md'))}
+export const FIXED = ${JSON.stringify(join(h2, 'HOST-DOWN-README.md'))}
+export const LAUNCHER = ${JSON.stringify(slowLauncher)}
+export const PROBE_BUDGET_MS = 3000
+export const TAIL_LINES = 50
+export const COOLDOWN_MS = 600000
+export const MAX_ATTEMPTS = 1
+`, 'utf8')
+
+    const t0 = Date.now()
+    let sup = { code: 0, out: '', killed: false }
+    try {
+      sup = { code: 0, out: execFileSync(NODE, [join(h2, 'config', 'host-supervisor.mjs'), '--exit-code', '4', '--repair'], {
+        encoding: 'utf8', timeout: 20000,
+        env: { ...process.env, DSH_SELFHEAL_HARNESS: h2, DSH_SUPERVISOR_REPAIR_AGENT: '1' },
+      }), killed: false }
+    } catch (error) {
+      sup = { code: error.status ?? -1, out: `${error.stdout ?? ''}${error.stderr ?? ''}`, killed: error.killed === true }
+    }
+    const elapsed = Date.now() - t0
+    // The stub launcher lives ~3 s. A pipe-inheriting call cannot return before that, so this bound
+    // separates the two behaviours without depending on exact timings.
+    check('supervisor finishes promptly instead of waiting on the relaunched host', elapsed < 2500, `took ${elapsed} ms`)
+    check('it did not hit the outer timeout', sup.killed !== true, 'supervisor had to be killed')
+    check('it reports the automatic relaunch', /已自动重启一次/u.test(sup.out), sup.out.split('\n').filter((l) => l.includes('重启')).join(' | ').slice(0, 200))
+    const inc2 = join(st2, 'incidents')
+    const dirs2 = existsSync(inc2) ? readdirSync(inc2) : []
+    check('it produced an incident package', dirs2.length === 1, dirs2.join(', '))
+    if (dirs2.length === 1) {
+      const sum2 = readFileSync(join(inc2, dirs2[0], 'summary.md'), 'utf8')
+      check('summary.md is the FINAL report, not the in-progress stub', !sum2.includes('修复判定进行中'), `len=${sum2.length}`)
+      check('the final report records the relaunch', /已自动重启一次/u.test(sum2), sum2.split('\n').filter((l) => l.includes('重启')).join(' | ').slice(0, 200))
+    }
+    check('supervisor.log was written', existsSync(join(st2, 'supervisor.log')), 'no supervisor.log')
+    // Give the detached child a moment, then confirm the relaunch reached the launcher.
+    const deadline2 = Date.now() + 3000
+    while (!existsSync(join(t2, 'launcher-ran.txt')) && Date.now() < deadline2) await new Promise((r) => setTimeout(r, 100))
+    check('the relaunched launcher actually ran', existsSync(join(t2, 'launcher-ran.txt')), 'launcher-ran.txt missing')
+  }
+
+  section('17. the dump reader agrees with the real YAML parser on shapes beyond the fixtures')
   // The reader has been wrong four times in ways a comfortable fixture could not express, so assert the
   // awkward-but-legal shapes directly rather than trusting that the sample dump happened to contain them.
   {

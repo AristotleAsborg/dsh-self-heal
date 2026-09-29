@@ -319,8 +319,26 @@ if (!wantRepair) {
   // nothing to do
 } else if (relaunch) {
   recordAttempt('relaunch')
-  run('cmd.exe', ['/c', 'start', '', LAUNCHER])
-  actions.push(`已自动重启一次（修复已由启动探针/闸门确认；${relaunchOptIn ? 'DSH_SUPERVISOR_RELAUNCH=1' : '默认行为'}）`)
+  // RELAUNCH MUST NOT INHERIT OUR PIPES.
+  //
+  // This used `run('cmd.exe', ['/c','start','',LAUNCHER])`, and `run` is execFileSync with the DEFAULT
+  // pipe stdio. `start` itself returns at once, but the launcher it starts INHERITS those pipes, and
+  // execFileSync waits for them to close — i.e. it waits for the host it just launched to EXIT. Measured
+  // 2026-09-29: a 4-second launcher left the call blocked past 20 s, while stdio:'ignore' returned in
+  // 20 ms. This is exactly how the live run ended: the relaunch happened (host came back), and then the
+  // supervisor sat on that call forever, so it never wrote its own final report — summary.md stayed the
+  // in-progress stub and supervisor.log gained no line, leaving no record that the relaunch had worked.
+  // It also coupled the new host's lifetime to this console: closing the window could take it down.
+  //
+  // Detached + ignored stdio is what the ladder already does for the same reason, so the relaunched host
+  // outlives this process and this window.
+  try {
+    const child = spawn('cmd.exe', ['/c', 'start', '', LAUNCHER], { detached: true, stdio: 'ignore', windowsHide: true })
+    child.unref()
+    actions.push(`已自动重启一次（修复已由启动探针/闸门确认；${relaunchOptIn ? 'DSH_SUPERVISOR_RELAUNCH=1' : '默认行为'}）`)
+  } catch (error) {
+    actions.push(`重启失败：${String(error.message).slice(0, 120)}（修复已完成，手动启动即可）`)
+  }
 } else if (!repairVerified) {
   actions.push('未重启：修复未被证实（没有可确认的修复结果），留给人处理')
 } else if (!gateAllowsLaunch) {
